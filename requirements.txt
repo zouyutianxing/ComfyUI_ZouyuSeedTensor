@@ -1,0 +1,2 @@
+# ComfyUI_JeekSeedTensor 无需额外 Python 依赖
+# 所有 import (torch, folder_paths, comfy.*) 均来自 ComfyUI 运行时
