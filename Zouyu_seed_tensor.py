@@ -1,13 +1,13 @@
 """
-JeekSeedTensor -- 种子张量缓存与混合系统
+ZouyuSeedTensor -- 种子张量缓存与混合系统
 
 将 MiniMax H3 视频生成过程中的 conditioning 张量 + 种子打包保存，支持
 通过提示词中的 @文件名 引用多个已保存的张量种子文件进行混合生成。
 
 Nodes:
-- JeekSaveSeedConditioning: 保存 conditioning + 种子到插件 seeds/ 目录
-- JeekLoadSeedConditioning: 加载单个种子张量文件
-- JeekSeedBlender: 解析提示词中的 @引用，混合多个种子张量
+- ZouyuSaveSeedConditioning: 保存 conditioning + 种子到插件 seeds/ 目录
+- ZouyuLoadSeedConditioning: 加载单个种子张量文件
+- ZouyuSeedBlender: 解析提示词中的 @引用，混合多个种子张量
 """
 
 import os
@@ -194,10 +194,10 @@ def blend_conditionings(cond_list, weights=None):
 
 
 # ---------------------------------------------------------------------------
-# 节点: JeekSaveSeedConditioning
+# 节点: ZouyuSaveSeedConditioning
 # ---------------------------------------------------------------------------
 
-class JeekSaveSeedConditioning:
+class ZouyuSaveSeedConditioning:
     """将 conditioning 张量与种子一起打包保存到插件 seeds/ 目录。
 
     输入:
@@ -254,7 +254,7 @@ class JeekSaveSeedConditioning:
     RETURN_NAMES = ("saved_path",)
     FUNCTION = "save"
     OUTPUT_NODE = True
-    CATEGORY = "JeekAI/SeedTensor"
+    CATEGORY = "ZouyuAI/SeedTensor"
 
     def save(self, conditioning, seed, filename, prompt_text="",
              duration=0.0, width=0, height=0):
@@ -287,7 +287,7 @@ class JeekSaveSeedConditioning:
         # 更新前端文件列表
         try:
             from server import PromptServer
-            PromptServer.instance.send_sync("jeek-seed-files-refresh", {})
+            PromptServer.instance.send_sync("Zouyu-seed-files-refresh", {})
         except Exception:
             pass
 
@@ -295,13 +295,13 @@ class JeekSaveSeedConditioning:
 
 
 # ---------------------------------------------------------------------------
-# 节点: JeekLoadSeedConditioning
+# 节点: ZouyuLoadSeedConditioning
 # ---------------------------------------------------------------------------
 
-class JeekLoadSeedConditioning:
+class ZouyuLoadSeedConditioning:
     """加载单个种子张量文件，输出 conditioning 和种子。
 
-    用于单文件场景，需要混合多个文件请使用 JeekSeedBlender。
+    用于单文件场景，需要混合多个文件请使用 ZouyuSeedBlender。
     """
 
     @classmethod
@@ -320,15 +320,15 @@ class JeekLoadSeedConditioning:
     RETURN_TYPES = ("CONDITIONING", "INT", "STRING")
     RETURN_NAMES = ("conditioning", "seed", "metadata")
     FUNCTION = "load"
-    CATEGORY = "JeekAI/SeedTensor"
+    CATEGORY = "ZouyuAI/SeedTensor"
 
     def load(self, file_name):
         if file_name == "(暂无文件)" or not file_name:
-            raise ValueError("[JeekSeedTensor] 没有可用的种子张量文件，请先使用 JeekSaveSeedConditioning 保存")
+            raise ValueError("[ZouyuSeedTensor] 没有可用的种子张量文件，请先使用 ZouyuSaveSeedConditioning 保存")
 
         path = os.path.join(_get_seeds_dir(), file_name)
         if not os.path.isfile(path):
-            raise FileNotFoundError(f"[JeekSeedTensor] 文件不存在: {path}")
+            raise FileNotFoundError(f"[ZouyuSeedTensor] 文件不存在: {path}")
 
         data = torch.load(path, map_location="cpu", weights_only=False)
         cond_data, meta, seed = _extract_structure(data)
@@ -357,10 +357,10 @@ class JeekLoadSeedConditioning:
 
 
 # ---------------------------------------------------------------------------
-# 节点: JeekSeedBlender
+# 节点: ZouyuSeedBlender
 # ---------------------------------------------------------------------------
 
-class JeekSeedBlender:
+class ZouyuSeedBlender:
     """解析提示词中的 @文件名 引用，加载多个种子张量文件并混合。
 
     使用方式:
@@ -400,7 +400,7 @@ class JeekSeedBlender:
     RETURN_TYPES = ("CONDITIONING", "INT", "STRING", "STRING")
     RETURN_NAMES = ("conditioning", "seed", "source_names", "cleaned_prompt")
     FUNCTION = "blend"
-    CATEGORY = "JeekAI/SeedTensor"
+    CATEGORY = "ZouyuAI/SeedTensor"
 
     def _parse_weight_map(self, weights_str: str) -> dict:
         """解析权重字符串: @name1=0.7,@name2=0.3"""
@@ -426,7 +426,7 @@ class JeekSeedBlender:
         refs = self._AT_PATTERN.findall(prompt)
         if not refs:
             raise ValueError(
-                "[JeekSeedTensor] 提示词中未找到任何 @文件名 引用。\n"
+                "[ZouyuSeedTensor] 提示词中未找到任何 @文件名 引用。\n"
                 "请在提示词中使用 @文件名 格式引用 seeds/ 目录下的种子张量文件。\n"
                 "例如: @shot_001 @shot_002 一个角色在森林中行走"
             )
@@ -473,8 +473,8 @@ class JeekSeedBlender:
 
         if not cond_list:
             raise FileNotFoundError(
-                f"[JeekSeedTensor] 所有 @引用 的文件都不存在于 {_get_seeds_dir()} 目录下。\n"
-                f"请确认已使用 JeekSaveSeedConditioning 保存过这些文件。"
+                f"[ZouyuSeedTensor] 所有 @引用 的文件都不存在于 {_get_seeds_dir()} 目录下。\n"
+                f"请确认已使用 ZouyuSaveSeedConditioning 保存过这些文件。"
             )
 
         # 4. 计算混合权重
@@ -518,13 +518,13 @@ class JeekSeedBlender:
 # ---------------------------------------------------------------------------
 
 NODE_CLASS_MAPPINGS = {
-    "JeekSaveSeedConditioning": JeekSaveSeedConditioning,
-    "JeekLoadSeedConditioning": JeekLoadSeedConditioning,
-    "JeekSeedBlender": JeekSeedBlender,
+    "ZouyuSaveSeedConditioning": ZouyuSaveSeedConditioning,
+    "ZouyuLoadSeedConditioning": ZouyuLoadSeedConditioning,
+    "ZouyuSeedBlender": ZouyuSeedBlender,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "JeekSaveSeedConditioning": "Jeek Save Seed+Tensor (保存种子张量)",
-    "JeekLoadSeedConditioning": "Jeek Load Seed+Tensor (加载种子张量)",
-    "JeekSeedBlender": "Jeek Seed Blender (多种子混合器)",
+    "ZouyuSaveSeedConditioning": "Zouyu Save Seed+Tensor (保存种子张量)",
+    "ZouyuLoadSeedConditioning": "Zouyu Load Seed+Tensor (加载种子张量)",
+    "ZouyuSeedBlender": "Zouyu Seed Blender (多种子混合器)",
 }
