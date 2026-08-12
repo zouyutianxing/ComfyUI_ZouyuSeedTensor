@@ -2,23 +2,108 @@
  * ZouyuSeedTensor 前端扩展
  *
  * 功能：
- * 6.  @ 引用 / 加载时自动显示种子文件下拉菜单（@ 自动补全 + 文件列表刷新）
- * 7.  批量处理进度（后端 ProgressBar 驱动，前端无需额外逻辑）
- * 10. 前端动态 LoRA 槽管理（+/- 增删）与动态参考槽管理（+/- 增删）
- * 5.  目录刷新按钮
+ * 1. 参考槽位自动增减：端口被链接时自动显示下一个端口（无 +/- 按钮）
+ * 2. UI 全中文化 + 中英文切换联动（language 开关切换时更新整个节点界面）
+ * 3. 节点颜色区分（UI 优化）
+ * 4. @ 引用自动补全下拉
+ * 5. 文件下拉刷新 + 清空临时存储按钮
  */
 
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 const CATEGORY = "ZouyuAI/SeedTensor";
-const MAX_REF_IMAGE = 9;
-const MAX_REF_VIDEO = 3;
-const MAX_REF_AUDIO = 3;
-const MAX_LORA = 8;
 
-async function fetchJson(url) {
-  const r = await fetch(url);
+// 槽位组（Python 端静态定义所有接口，JS 端动态增减）
+const SLOT_GROUPS = [
+  { prefix: "reference_image_", type: "IMAGE", max: 9 },
+  { prefix: "ref_video_audio_", type: "AUDIO", max: 3 },
+  { prefix: "ref_video_", type: "IMAGE", max: 3 },
+  { prefix: "ref_audio_", type: "AUDIO", max: 3 },
+];
+
+// ---------------------------------------------------------------------------
+// i18n
+// ---------------------------------------------------------------------------
+const LANG_KEY = "zouyu_seed_tensor_lang";
+
+const LABELS = {
+  conditioning: { zh: "条件张量", en: "Conditioning" },
+  seed: { zh: "种子", en: "Seed" },
+  filename: { zh: "文件名", en: "Filename" },
+  storage: { zh: "存储位置", en: "Storage" },
+  language: { zh: "界面语言", en: "Language" },
+  canvas_mode: { zh: "画布模式", en: "Canvas Mode" },
+  width: { zh: "宽度", en: "Width" },
+  height: { zh: "高度", en: "Height" },
+  ref_image_size: { zh: "参考图缩放", en: "Ref Image Size" },
+  crop_mode: { zh: "裁剪方式", en: "Crop Mode" },
+  prompt_text: { zh: "提示词", en: "Prompt" },
+  duration: { zh: "时长(秒)", en: "Duration (s)" },
+  ref_image_format: { zh: "参考图格式", en: "Ref Format" },
+  file_name: { zh: "种子文件", en: "Seed File" },
+  prompt: { zh: "提示词", en: "Prompt" },
+  weights: { zh: "权重", en: "Weights" },
+  rebuild: { zh: "重建目录", en: "Rebuild" },
+  trigger: { zh: "触发", en: "Trigger" },
+};
+
+const SLOT_LABELS = {
+  reference_image_: { zh: "参考图", en: "Ref Image" },
+  ref_video_audio_: { zh: "视频配乐", en: "Video Audio" },
+  ref_video_: { zh: "参考视频", en: "Ref Video" },
+  ref_audio_: { zh: "参考音频", en: "Ref Audio" },
+};
+
+const TITLES = {
+  ZouyuSaveSeedConditioning: { zh: "保存种子张量", en: "Save Seed Tensor" },
+  ZouyuLoadSeedConditioning: { zh: "加载种子张量", en: "Load Seed Tensor" },
+  ZouyuSeedBlender: { zh: "多种子混合器", en: "Seed Blender" },
+  ZouyuExtractSeedMedia: { zh: "提取参考媒体", en: "Extract Seed Media" },
+  ZouyuSeedCatalog: { zh: "种子目录", en: "Seed Catalog" },
+  ZouyuSeedPreview: { zh: "种子预览", en: "Seed Preview" },
+  ZouyuClearTemp: { zh: "清空临时存储", en: "Clear Temp Storage" },
+};
+
+const NODE_COLORS = {
+  ZouyuSaveSeedConditioning: { color: "#2e7d4f", bgcolor: "#16321f" },
+  ZouyuLoadSeedConditioning: { color: "#2f6b8f", bgcolor: "#162a38" },
+  ZouyuSeedBlender: { color: "#7a4fa0", bgcolor: "#2c1a3a" },
+  ZouyuExtractSeedMedia: { color: "#1f8a8a", bgcolor: "#123232" },
+  ZouyuSeedCatalog: { color: "#6b6b6b", bgcolor: "#262626" },
+  ZouyuSeedPreview: { color: "#b0722a", bgcolor: "#3a2812" },
+  ZouyuClearTemp: { color: "#a03838", bgcolor: "#3a1616" },
+};
+
+function getLang() {
+  return localStorage.getItem(LANG_KEY) || "中文";
+}
+
+function setLang(lang) {
+  localStorage.setItem(LANG_KEY, lang);
+}
+
+function isZh(lang) {
+  return lang !== "English";
+}
+
+function slotLabel(name, lang) {
+  for (const prefix in SLOT_LABELS) {
+    const m = name.match(new RegExp("^" + prefix + "(\\d+)$"));
+    if (m) {
+      const num = Number(m[1]) + 1;
+      const base = isZh(lang) ? SLOT_LABELS[prefix].zh : SLOT_LABELS[prefix].en;
+      return `${base} ${num}`;
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// 网络工具
+// ---------------------------------------------------------------------------
+async function fetchJson(url, options) {
+  const r = await fetch(url, options);
   if (!r.ok) throw new Error(r.statusText);
   return r.json();
 }
@@ -26,25 +111,18 @@ async function fetchJson(url) {
 async function listSeedFiles() {
   try {
     const d = await fetchJson("/zouyu_seed_tensor/files");
-    return d.files || d || [];
+    return d.all || [];
   } catch {
     return [];
   }
 }
 
-// ---------------------------------------------------------------------------
-// 文件下拉刷新（功能 6）
-// ---------------------------------------------------------------------------
 async function refreshFileComboWidget(widget) {
   const files = await listSeedFiles();
   const full = (files || []).filter((f) => String(f).endsWith(".pt"));
   const values = full.length ? full : ["(暂无文件)"];
-  if (widget.options) {
-    widget.options.values = values;
-  }
-  if (!values.includes(widget.value)) {
-    widget.value = values[0];
-  }
+  if (widget.options) widget.options.values = values;
+  if (!values.includes(widget.value)) widget.value = values[0];
 }
 
 async function refreshAllFileCombos() {
@@ -56,18 +134,118 @@ async function refreshAllFileCombos() {
   app.graph?.setDirtyCanvas(true, false);
 }
 
-function addRefreshButton(node) {
-  const w = node.widgets?.find((x) => x.name === "file_name");
-  if (!w) return;
-  const btn = node.addWidget("button", "🔄 刷新目录", null, async () => {
-    await refreshFileComboWidget(w);
-    app.graph?.setDirtyCanvas(true, false);
-  });
-  btn.serialize = false;
+// ---------------------------------------------------------------------------
+// i18n 应用
+// ---------------------------------------------------------------------------
+function applyLanguage(node, lang) {
+  const zh = isZh(lang);
+
+  // 标题
+  const t = TITLES[node.comfyClass || node.type];
+  if (t) node.title = zh ? t.zh : t.en;
+
+  // widget label
+  for (const w of node.widgets || []) {
+    if (w.__zouyuButtonKey) {
+      const key = w.__zouyuButtonKey;
+      w.label = zh ? key.zh : key.en;
+      w.name = w.label;
+      continue;
+    }
+    const entry = LABELS[w.name];
+    if (entry) w.label = zh ? entry.zh : entry.en;
+  }
+
+  // 输入槽 label（参考图/视频/音频）
+  for (const inp of node.inputs || []) {
+    const sl = slotLabel(inp.name, lang);
+    if (sl) {
+      inp.label = sl;
+      continue;
+    }
+    const entry = LABELS[inp.name];
+    if (entry) inp.label = zh ? entry.zh : entry.en;
+  }
+
+  app.graph?.setDirtyCanvas(true, false);
+}
+
+function applyLanguageToAll(lang) {
+  const nodes = app.graph?._nodes || [];
+  for (const n of nodes) {
+    if (n.comfyClass?.startsWith?.("Zouyu") || CATEGORY === n.constructor?.category) {
+      applyLanguage(n, lang);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
-// @ 提及自动补全（功能 6）
+// 参考槽位自动增减（功能 1）
+// ---------------------------------------------------------------------------
+function groupOf(name) {
+  for (const g of SLOT_GROUPS) {
+    if (new RegExp("^" + g.prefix + "\\d+$").test(name)) return g;
+  }
+  return null;
+}
+
+function refreshGroup(node, g) {
+  let count = 0;
+  while (count < g.max && node.inputs.some((inp) => inp.name === g.prefix + count)) count++;
+
+  // 最后一个有链接的槽
+  let lastLinked = -1;
+  for (let i = 0; i < count; i++) {
+    const inp = node.inputs.find((x) => x.name === g.prefix + i);
+    if (inp && inp.link != null) lastLinked = i;
+  }
+
+  // 目标槽数：至少 1；最后一个已链接则 +1 扩展
+  let target = Math.max(1, lastLinked + 1);
+  if (lastLinked === count - 1 && count < g.max) target = count + 1;
+
+  // 收缩
+  while (count > target) {
+    const idx = node.inputs.findIndex((x) => x.name === g.prefix + (count - 1));
+    if (idx >= 0) node.removeInput(idx);
+    count--;
+  }
+  // 扩展
+  while (count < target) {
+    node.addInput(g.prefix + count, g.type);
+    const inp = node.inputs.find((x) => x.name === g.prefix + count);
+    if (inp) {
+      const sl = slotLabel(inp.name, getLang());
+      if (sl) inp.label = sl;
+    }
+    count++;
+  }
+}
+
+function refreshAllGroups(node) {
+  for (const g of SLOT_GROUPS) refreshGroup(node, g);
+  // 强制重新计算节点尺寸并重绘画布
+  node.size = node.computeSize();
+  app.graph?.setDirtyCanvas(true, false);
+}
+
+function initSlots(node) {
+  for (const g of SLOT_GROUPS) {
+    let lastLinked = -1;
+    for (let i = 0; i < g.max; i++) {
+      const inp = node.inputs.find((x) => x.name === g.prefix + i);
+      if (inp && inp.link != null) lastLinked = i;
+    }
+    const keep = Math.max(1, lastLinked + 1);
+    for (let i = g.max - 1; i >= keep; i--) {
+      const idx = node.inputs.findIndex((x) => x.name === g.prefix + i);
+      if (idx >= 0) node.removeInput(idx);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// @ 提及自动补全
 // ---------------------------------------------------------------------------
 const MENTION_STYLE = `
 .zouyu-mention-menu{position:fixed;z-index:99999;min-width:220px;max-width:340px;max-height:260px;
@@ -77,7 +255,6 @@ const MENTION_STYLE = `
 .zouyu-mention-item{display:flex;align-items:center;gap:8px;padding:6px 12px;cursor:pointer;color:#ddd}
 .zouyu-mention-item:hover,.zouyu-mention-item.active{background:#3a3a3a;color:#fff}
 .zouyu-mention-label{font-weight:600;color:#4fff8f}
-.zouyu-mention-meta{color:#999;font-size:11px}
 .zouyu-mention-empty{padding:10px 12px;color:#999;text-align:center}
 `;
 
@@ -131,10 +308,7 @@ function setupMentionAutocomplete(node) {
 
   const renderMenu = async (query, ta) => {
     const files = await listSeedFiles();
-    const names = files
-      .map((f) => String(f).replace(/\.pt$/i, ""))
-      .filter(Boolean)
-      .sort();
+    const names = files.map((f) => String(f).replace(/\.pt$/i, "")).filter(Boolean).sort();
     const q = (query || "").toLowerCase();
     filtered = names.filter((n) => !q || n.toLowerCase().includes(q));
 
@@ -166,7 +340,6 @@ function setupMentionAutocomplete(node) {
     const start = mentionStart >= 0 ? mentionStart : caret;
     const next = value.slice(0, start) + `@${name} ` + value.slice(caret);
     ta.value = next;
-    // 同步到 widget + 触发输入事件
     promptWidget.value = next;
     promptWidget.callback?.(next);
     ta.dispatchEvent(new Event("input", { bubbles: true }));
@@ -192,13 +365,11 @@ function setupMentionAutocomplete(node) {
 
   const moveActive = (delta) => {
     if (!filtered.length) return;
-    const prev = activeIndex;
     activeIndex = (activeIndex + delta + filtered.length) % filtered.length;
     menu?.querySelectorAll(".zouyu-mention-item").forEach((row, i) => {
       row.classList.toggle("active", i === activeIndex);
     });
-    const activeRow = menu?.querySelectorAll(".zouyu-mention-item")[activeIndex];
-    activeRow?.scrollIntoView({ block: "nearest" });
+    menu?.querySelectorAll(".zouyu-mention-item")[activeIndex]?.scrollIntoView({ block: "nearest" });
   };
 
   const wire = (ta) => {
@@ -221,14 +392,10 @@ function setupMentionAutocomplete(node) {
         if (e.key === "Escape") { e.preventDefault(); closeMenu(); return; }
       }
     });
-    ta.addEventListener("blur", () => {
-      setTimeout(closeMenu, 150);
-    });
+    ta.addEventListener("blur", () => setTimeout(closeMenu, 150));
   };
 
   injectMentionStyles();
-
-  // 等待 textarea 元素被渲染后挂载
   const tryAttach = () => {
     let ta = promptWidget.element;
     if (ta && ta.tagName !== "TEXTAREA" && ta.tagName !== "INPUT") {
@@ -244,112 +411,15 @@ function setupMentionAutocomplete(node) {
 }
 
 // ---------------------------------------------------------------------------
-// 动态 LoRA 槽（功能 10）
+// 按钮
 // ---------------------------------------------------------------------------
-function setupLoraSlots(node) {
-  const countWidget = node.widgets?.find((w) => w.name === "lora_count");
-
-  const applyCount = () => {
-    const count = Math.max(0, Math.min(MAX_LORA, Number(countWidget?.value ?? 1)));
-    // 移除超出 count 的槽位输入
-    for (let i = node.inputs.length - 1; i >= 0; i--) {
-      const name = node.inputs[i].name;
-      const m = name.match(/^lora_(name|strength)_(\d+)$/);
-      if (m && Number(m[2]) > count) {
-        node.removeInput(i);
-      }
-    }
-    // 补齐缺失的槽位输入（从 1 到 count）
-    for (let i = 1; i <= count; i++) {
-      if (!node.inputs.some((inp) => inp.name === `lora_name_${i}`)) {
-        node.addInput(`lora_name_${i}`, "STRING");
-      }
-      if (!node.inputs.some((inp) => inp.name === `lora_strength_${i}`)) {
-        node.addInput(`lora_strength_${i}`, "FLOAT");
-      }
-    }
-    // 重新排序：把 lora 槽位输入放到 node.inputs 末尾（+/- 按钮之后）
-  };
-
-  const addBtn = node.addWidget("button", "＋ 添加 LoRA 槽", null, () => {
-    const cur = Number(countWidget?.value ?? 0);
-    if (countWidget) countWidget.value = Math.min(MAX_LORA, cur + 1);
-    applyCount();
-    app.graph?.setDirtyCanvas(true, false);
-  });
-  addBtn.serialize = false;
-
-  const delBtn = node.addWidget("button", "－ 移除 LoRA 槽", null, () => {
-    const cur = Number(countWidget?.value ?? 0);
-    if (countWidget) countWidget.value = Math.max(0, cur - 1);
-    applyCount();
-    app.graph?.setDirtyCanvas(true, false);
-  });
-  delBtn.serialize = false;
-
-  applyCount();
-}
-
-// ---------------------------------------------------------------------------
-// 动态参考槽（功能 10 / 功能 4）：参考图 / 视频 / 音频
-// ---------------------------------------------------------------------------
-function setupRefSlots(node) {
-  const groups = [
-    { prefix: "reference_image_", type: "IMAGE", max: MAX_REF_IMAGE, label: "参考图", def: 1 },
-    { prefix: "ref_video_audio_", type: "AUDIO", max: MAX_REF_AUDIO, label: "视频配乐", def: 0 },
-    { prefix: "ref_video_", type: "IMAGE", max: MAX_REF_VIDEO, label: "参考视频", def: 0 },
-    { prefix: "ref_audio_", type: "AUDIO", max: MAX_REF_AUDIO, label: "参考音频", def: 0 },
-  ];
-
-  const isSlot = (name, prefix) => new RegExp("^" + prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\d+$").test(name);
-
-  const visibleCount = (prefix) => {
-    let c = 0;
-    for (let i = 0; i < 12; i++) {
-      if (node.inputs.some((inp) => inp.name === prefix + i)) c++;
-      else break;
-    }
-    return c;
-  };
-
-  // 初始：隐藏超出默认数量的槽位
-  for (const g of groups) {
-    let count = 0;
-    for (let i = g.max - 1; i >= 0; i--) {
-      const name = g.prefix + i;
-      const idx = node.inputs.findIndex((inp) => inp.name === name);
-      if (idx < 0) continue;
-      if (i >= g.def) {
-        node.removeInput(idx);
-      } else {
-        count++;
-      }
-    }
-  }
-
-  const makeButtons = (g) => {
-    const addBtn = node.addWidget("button", `＋ ${g.label}`, null, () => {
-      const count = visibleCount(g.prefix);
-      if (count < g.max) {
-        node.addInput(g.prefix + count, g.type);
-        app.graph?.setDirtyCanvas(true, false);
-      }
-    });
-    addBtn.serialize = false;
-
-    const delBtn = node.addWidget("button", `－ ${g.label}`, null, () => {
-      const count = visibleCount(g.prefix);
-      if (count > 0) {
-        const name = g.prefix + (count - 1);
-        const idx = node.inputs.findIndex((inp) => inp.name === name);
-        if (idx >= 0) node.removeInput(idx);
-        app.graph?.setDirtyCanvas(true, false);
-      }
-    });
-    delBtn.serialize = false;
-  };
-
-  for (const g of groups) makeButtons(g);
+function addButton(node, keyZh, keyEn, onClick) {
+  const lang = getLang();
+  const label = isZh(lang) ? keyZh : keyEn;
+  const btn = node.addWidget("button", label, null, onClick);
+  btn.serialize = false;
+  btn.__zouyuButtonKey = { zh: keyZh, en: keyEn };
+  return btn;
 }
 
 // ---------------------------------------------------------------------------
@@ -360,20 +430,89 @@ app.registerExtension({
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData.category !== CATEGORY) return;
 
+    const comfyClass = nodeData.name;
+
+    // 拦截连接变化：自动增减参考槽位
+    const origOnConnectionsChange = nodeType.prototype.onConnectionsChange;
+    nodeType.prototype.onConnectionsChange = function (type, index, connected, link_info) {
+      const r = origOnConnectionsChange?.apply(this, arguments);
+      try {
+        if (this.__zouyuRefreshSlots && !this.__zouyuRefreshing) {
+          this.__zouyuRefreshing = true;
+          try {
+            this.__zouyuRefreshSlots();
+          } finally {
+            this.__zouyuRefreshing = false;
+          }
+        }
+      } catch (e) {
+        console.error("[ZouyuSeedTensor] slot refresh error:", e);
+      }
+      return r;
+    };
+
     const onNodeCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
       const r = onNodeCreated?.apply(this, arguments);
       const node = this;
+      node.comfyClass = comfyClass;
 
       try {
-        if (nodeData.name === "ZouyuSeedBlender") {
+        // 节点颜色（UI 优化）
+        const color = NODE_COLORS[comfyClass];
+        if (color) {
+          node.color = color.color;
+          node.bgcolor = color.bgcolor;
+        }
+
+        // 应用当前语言
+        applyLanguage(node, getLang());
+
+        // 保存节点：参考槽自动增减
+        if (comfyClass === "ZouyuSaveSeedConditioning") {
+          initSlots(node);
+          node.__zouyuRefreshSlots = () => refreshAllGroups(node);
+          node.size = node.computeSize();
+        }
+
+        // 混合器：@ 自动补全
+        if (comfyClass === "ZouyuSeedBlender") {
           setupMentionAutocomplete(node);
-        } else if (nodeData.name === "ZouyuLoraStack") {
-          setupLoraSlots(node);
-        } else if (nodeData.name === "ZouyuSaveSeedConditioning") {
-          setupRefSlots(node);
-        } else if (nodeData.name === "ZouyuLoadSeedConditioning" || nodeData.name === "ZouyuExtractSeedMedia") {
-          addRefreshButton(node);
+        }
+
+        // 语言切换联动
+        const langWidget = node.widgets?.find((w) => w.name === "language");
+        if (langWidget) {
+          const origCallback = langWidget.callback;
+          langWidget.callback = function (value) {
+            const r = origCallback?.call(this, value);
+            setLang(value);
+            applyLanguage(node, value);
+            return r;
+          };
+        }
+
+        // 文件下拉 + 刷新按钮
+        if (comfyClass === "ZouyuLoadSeedConditioning" || comfyClass === "ZouyuExtractSeedMedia" || comfyClass === "ZouyuSeedPreview") {
+          const fw = node.widgets?.find((w) => w.name === "file_name");
+          if (fw) {
+            addButton(node, "🔄 刷新", "🔄 Refresh", async () => {
+              await refreshFileComboWidget(fw);
+              app.graph?.setDirtyCanvas(true, false);
+            });
+          }
+        }
+
+        // 目录节点：清空临时 + 刷新
+        if (comfyClass === "ZouyuSeedCatalog") {
+          addButton(node, "🗑 清空临时存储", "🗑 Clear Temp", async () => {
+            try {
+              const d = await fetchJson("/zouyu_seed_tensor/clear_temp", { method: "POST" });
+              alert(`已清空临时存储（移除 ${d.removed} 项）`);
+            } catch (e) {
+              alert("清空失败: " + e);
+            }
+          });
         }
       } catch (e) {
         console.error("[ZouyuSeedTensor] UI setup error:", e);
