@@ -45,8 +45,8 @@ REF_IMAGE_SHORT_EDGE = 2048     # 参考图短边上限（"max" 策略）
 FPS = 24
 AUDIO_LATENT_FPS = 40
 
-# 参考槽位上限（与官方 Autogrow max 一致）
-MAX_REFERENCE_IMAGES = 9
+# 参考槽位上限（动态端口：参考图最多 50 个，视频/音频各 3 个）
+MAX_REFERENCE_IMAGES = 50
 MAX_REFERENCE_VIDEOS = 3
 MAX_REFERENCE_AUDIOS = 3
 
@@ -55,22 +55,22 @@ MAX_REFERENCE_AUDIOS = 3
 # ---------------------------------------------------------------------------
 _CHOICE_MAPS = {
     "canvas_mode": {
-        "自动": "auto", "auto": "auto",
-        "最大": "max", "max": "max",
-        "自定义": "custom", "custom": "custom",
+        "自动": "auto", "auto": "auto", "Auto": "auto",
+        "最大": "max", "max": "max", "Max": "max",
+        "自定义": "custom", "custom": "custom", "Custom": "custom",
     },
     "ref_image_size": {
-        "匹配画布": "match", "match": "match",
-        "短边2048": "max", "max": "max",
+        "匹配画布": "match", "match": "match", "Match": "match",
+        "短边2048": "max", "max": "max", "Max": "max", "Max(2048)": "max",
     },
     "crop_mode": {
-        "不裁剪": "disabled", "disabled": "disabled",
-        "居中裁剪": "center", "center": "center",
-        "等比填充": "contain", "contain": "contain",
+        "不裁剪": "disabled", "disabled": "disabled", "Disabled": "disabled",
+        "居中裁剪": "center", "center": "center", "Center": "center",
+        "等比填充": "contain", "contain": "contain", "Contain": "contain",
     },
     "storage": {
-        "永久存储": "permanent", "permanent": "permanent",
-        "临时存储": "temp", "temp": "temp",
+        "永久存储": "permanent", "permanent": "permanent", "Permanent": "permanent",
+        "临时存储": "temp", "temp": "temp", "Temporary": "temp",
     },
 }
 
@@ -81,6 +81,11 @@ def normalize_choice(key, value, default):
     v = str(value)
     if v in m:
         return m[v]
+    # 兜底：大小写不敏感
+    low = v.lower()
+    for k, mapped in m.items():
+        if k.lower() == low:
+            return mapped
     return default
 
 # ---------------------------------------------------------------------------
@@ -200,6 +205,60 @@ def clear_temp_dir():
     except Exception as exc:  # noqa: BLE001
         print(f"[ZouyuSeedTensor] 清空临时目录失败: {exc}")
     return removed
+
+
+def clear_temp_except(keep_name):
+    """清空临时目录内所有文件，仅保留 keep_name（文件名，如 'xxx.pt'）。返回删除数量。"""
+    removed = 0
+    try:
+        if _TEMP_DIR.exists():
+            for f in _TEMP_DIR.iterdir():
+                if f.name == keep_name:
+                    continue
+                try:
+                    if f.is_symlink() or f.is_file():
+                        f.unlink()
+                        removed += 1
+                    elif f.is_dir():
+                        shutil.rmtree(f, ignore_errors=True)
+                        removed += 1
+                except OSError:
+                    continue
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ZouyuSeedTensor] 清空临时目录（保留 {keep_name}）失败: {exc}")
+    return removed
+
+
+def copy_to_temp(src_path):
+    """把 src_path 文件复制到临时目录，返回临时目录中的绝对路径。"""
+    try:
+        src = Path(src_path)
+        if not src.is_file():
+            return None
+        dst = _TEMP_DIR / src.name
+        if src.resolve() == dst.resolve():
+            return str(dst)  # 已在临时目录，无需复制
+        shutil.copy2(str(src), str(dst))
+        return str(dst)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ZouyuSeedTensor] 复制到临时目录失败: {exc}")
+        return None
+
+
+def free_memory():
+    """卸载显存与内存占用（中间变量释放后调用）。"""
+    try:
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass
+            torch.cuda.empty_cache()
+            gc.collect()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

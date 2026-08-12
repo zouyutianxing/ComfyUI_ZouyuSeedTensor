@@ -3,6 +3,9 @@
 
 将 conditioning 张量 + 种子 + 参考媒体（图片/视频/音频）+ 溯源元数据打包保存。
 支持保存到永久目录（seeds/）或临时目录（temp/）。
+
+参考图/视频/音频端口由前端动态增减（参考图最多 50 个）。
+combo 值使用英文内部键（后端稳定），显示文字由前端 i18n 切换中英文。
 """
 
 import os
@@ -17,7 +20,7 @@ from ..core import (
     MAX_REFERENCE_IMAGES, MAX_REFERENCE_VIDEOS, MAX_REFERENCE_AUDIOS,
     safe_filename, now_iso,
     get_seeds_dir, get_temp_dir,
-    convert_to_serializable, extract_structure,
+    convert_to_serializable,
     resolve_canvas, ref_target_dims, preprocess_image,
     image_to_bytes, collect_gpu_info, temporal_shape,
     normalize_choice, update_catalog_entry, write_sidecar_meta,
@@ -26,17 +29,28 @@ from ..core import (
 
 
 class ZouyuSaveSeedConditioning:
-    """保存 conditioning + 种子 + 参考媒体 + 溯源元数据。
-
-    参考图/视频/音频槽位在前端按需自动增减（链接一个即显示下一个）。
-    """
+    """保存 conditioning + 种子 + 参考媒体 + 溯源元数据。"""
 
     @classmethod
     def INPUT_TYPES(cls):
+        optional = {
+            "prompt_text": ("STRING", {"default": "", "multiline": True}),
+            "duration": ("FLOAT", {"default": 0.0, "min": 0.0}),
+            "ref_image_format": (["jpeg", "png"], {"default": "jpeg"}),
+        }
+        # 参考图动态端口（最多 50 个）
+        for i in range(MAX_REFERENCE_IMAGES):
+            optional[f"reference_image_{i}"] = ("IMAGE", {"tooltip": f"参考图 {i + 1}"})
+        for i in range(MAX_REFERENCE_VIDEOS):
+            optional[f"ref_video_{i}"] = ("IMAGE", {"tooltip": f"参考视频 {i + 1}（帧序列，24fps）"})
+            optional[f"ref_video_audio_{i}"] = ("AUDIO", {"tooltip": f"参考视频 {i + 1} 的配乐"})
+        for i in range(MAX_REFERENCE_AUDIOS):
+            optional[f"ref_audio_{i}"] = ("AUDIO", {"tooltip": f"独立参考音频 {i + 1}"})
+
         return {
             "required": {
                 "conditioning": ("CONDITIONING", {
-                    "tooltip": "来自 MiniMaxH3ReferenceToVideo 或 Director Conditioning 的 conditioning 输出"
+                    "tooltip": "来自 MiniMaxH3ReferenceToVideo 或融合节点的 conditioning 输出"
                 }),
                 "seed": ("INT", {
                     "default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF,
@@ -46,14 +60,14 @@ class ZouyuSaveSeedConditioning:
                     "default": "my_seed",
                     "tooltip": "保存文件名（不含扩展名），如 shot_001_black_cat"
                 }),
-                "storage": (["永久存储", "临时存储"], {
-                    "default": "永久存储",
-                    "tooltip": "存储位置：永久存储=seeds/ 目录（长期保留）；临时存储=temp/ 目录（生成完成后可一键清空）"
+                "storage": (["permanent", "temp"], {
+                    "default": "permanent",
+                    "tooltip": "存储位置：permanent=seeds/ 永久目录；temp=temp/ 临时目录"
                 }),
                 "language": (["中文", "English"], {"default": "中文"}),
-                "canvas_mode": (["自动", "最大", "自定义"], {
-                    "default": "自动",
-                    "tooltip": "画布计算模式：自动=按参考图宽高比自适应；最大=使用给定/默认尺寸；自定义=使用下方宽度/高度"
+                "canvas_mode": (["auto", "max", "custom"], {
+                    "default": "auto",
+                    "tooltip": "画布计算模式：auto=按参考图宽高比自适应；max=使用给定/默认尺寸；custom=使用宽度/高度"
                 }),
                 "width": ("INT", {
                     "default": 0, "min": 0, "max": 8192, "step": 32,
@@ -63,38 +77,16 @@ class ZouyuSaveSeedConditioning:
                     "default": 0, "min": 0, "max": 8192, "step": 32,
                     "tooltip": "目标高度（0=自动）。MiniMax H3 要求 32 的倍数"
                 }),
-                "ref_image_size": (["匹配画布", "短边2048"], {
-                    "default": "匹配画布",
-                    "tooltip": "参考图统一缩放策略：匹配画布=按生成画布面积；短边2048=短边 2048 高保真"
+                "ref_image_size": (["match", "max"], {
+                    "default": "match",
+                    "tooltip": "参考图统一缩放策略：match=按生成画布面积；max=短边 2048 高保真"
                 }),
-                "crop_mode": (["不裁剪", "居中裁剪", "等比填充"], {
-                    "default": "不裁剪",
-                    "tooltip": "参考图裁剪+缩放方式：不裁剪=按宽高比缩放；居中裁剪=铺满画布居中裁剪；等比填充=letterbox 填充"
+                "crop_mode": (["disabled", "center", "contain"], {
+                    "default": "disabled",
+                    "tooltip": "参考图裁剪+缩放：disabled=按宽高比缩放；center=铺满居中裁剪；contain=letterbox 填充"
                 }),
             },
-            "optional": {
-                "prompt_text": ("STRING", {"default": "", "multiline": True}),
-                "duration": ("FLOAT", {"default": 0.0, "min": 0.0}),
-                "ref_image_format": (["jpeg", "png"], {"default": "jpeg"}),
-                "reference_image_0": ("IMAGE", {"tooltip": "参考图 1（连接后自动显示下一个槽位）"}),
-                "reference_image_1": ("IMAGE", {"tooltip": "参考图 2"}),
-                "reference_image_2": ("IMAGE", {"tooltip": "参考图 3"}),
-                "reference_image_3": ("IMAGE", {"tooltip": "参考图 4"}),
-                "reference_image_4": ("IMAGE", {"tooltip": "参考图 5"}),
-                "reference_image_5": ("IMAGE", {"tooltip": "参考图 6"}),
-                "reference_image_6": ("IMAGE", {"tooltip": "参考图 7"}),
-                "reference_image_7": ("IMAGE", {"tooltip": "参考图 8"}),
-                "reference_image_8": ("IMAGE", {"tooltip": "参考图 9"}),
-                "ref_video_0": ("IMAGE", {"tooltip": "参考视频 1（帧序列，24fps，2-15s）"}),
-                "ref_video_1": ("IMAGE", {"tooltip": "参考视频 2"}),
-                "ref_video_2": ("IMAGE", {"tooltip": "参考视频 3"}),
-                "ref_video_audio_0": ("AUDIO", {"tooltip": "参考视频 1 的配乐"}),
-                "ref_video_audio_1": ("AUDIO", {"tooltip": "参考视频 2 的配乐"}),
-                "ref_video_audio_2": ("AUDIO", {"tooltip": "参考视频 3 的配乐"}),
-                "ref_audio_0": ("AUDIO", {"tooltip": "独立参考音频 1"}),
-                "ref_audio_1": ("AUDIO", {"tooltip": "独立参考音频 2"}),
-                "ref_audio_2": ("AUDIO", {"tooltip": "独立参考音频 3"}),
-            },
+            "optional": optional,
         }
 
     RETURN_TYPES = ("STRING",)
@@ -106,9 +98,9 @@ class ZouyuSaveSeedConditioning:
     def _collect(self, kwargs, prefix, count):
         return [kwargs.get(f"{prefix}{i}") for i in range(count)]
 
-    def save(self, conditioning, seed, filename, language, canvas_mode="自动",
-             width=0, height=0, ref_image_size="匹配画布", crop_mode="不裁剪",
-             storage="永久存储", prompt_text="", duration=0.0, ref_image_format="jpeg",
+    def save(self, conditioning, seed, filename, language, canvas_mode="auto",
+             width=0, height=0, ref_image_size="match", crop_mode="disabled",
+             storage="permanent", prompt_text="", duration=0.0, ref_image_format="jpeg",
              **kwargs):
         canvas_mode = normalize_choice("canvas_mode", canvas_mode, "auto")
         ref_image_size = normalize_choice("ref_image_size", ref_image_size, "match")
@@ -288,7 +280,7 @@ class ZouyuSaveSeedConditioning:
             write_sidecar_meta(f"{safe_name}.pt", entry)
             update_catalog_entry(safe_name, entry)
 
-        loc = "临时" if storage == "temp" else "永久"
+        loc = "temp" if storage == "temp" else "permanent"
         if zh:
             log(f"已保存种子张量[{loc}] -> {path} ({mb:.1f} MB, seed={seed}, "
                 f"画布={canvas_w}x{canvas_h}({canvas_used_mode}), 参考图={len(ref_image_bytes)}, "
@@ -302,7 +294,7 @@ class ZouyuSaveSeedConditioning:
 
         summary = (
             f"文件: {safe_name}.pt\n"
-            f"位置: {loc}存储\n"
+            f"位置: {'临时' if storage == 'temp' else '永久'}存储\n"
             f"种子: {seed}\n"
             f"画布: {canvas_w}x{canvas_h} ({canvas_used_mode})\n"
             f"参考图: {len(ref_image_bytes)}  视频: {len(ref_video_tensors)}  音频: {len(ref_audio_tensors)}\n"

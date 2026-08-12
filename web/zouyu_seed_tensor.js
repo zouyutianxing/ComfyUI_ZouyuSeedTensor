@@ -2,9 +2,10 @@
  * ZouyuSeedTensor 前端扩展
  *
  * 功能：
- * 1. 参考槽位自动增减：端口被链接时自动显示下一个端口（无 +/- 按钮）
- * 2. UI 全中文化 + 中英文切换联动（language 开关切换时更新整个节点界面）
- * 3. 节点颜色区分（UI 优化）
+ * 1. 参考槽位自动增减：端口被链接时自动显示下一个端口（参考图上限 50）
+ * 2. 中英文切换：仅改 UI 显示（getOptionLabel 值/显示分离），后端值保持英文键稳定；
+ *    语言开关只作用于当前节点（非全局）
+ * 3. 节点颜色区分
  * 4. @ 引用自动补全下拉
  * 5. 文件下拉刷新 + 清空临时存储按钮
  */
@@ -16,7 +17,7 @@ const CATEGORY = "ZouyuAI/SeedTensor";
 
 // 槽位组（Python 端静态定义所有接口，JS 端动态增减）
 const SLOT_GROUPS = [
-  { prefix: "reference_image_", type: "IMAGE", max: 9 },
+  { prefix: "reference_image_", type: "IMAGE", max: 50 },
   { prefix: "ref_video_audio_", type: "AUDIO", max: 3 },
   { prefix: "ref_video_", type: "IMAGE", max: 3 },
   { prefix: "ref_audio_", type: "AUDIO", max: 3 },
@@ -26,9 +27,28 @@ const SLOT_GROUPS = [
 // i18n
 // ---------------------------------------------------------------------------
 const LANG_KEY = "zouyu_seed_tensor_lang";
+let currentLang = localStorage.getItem(LANG_KEY) || "中文";
 
+function getLang() {
+  return currentLang;
+}
+
+function setLang(lang) {
+  currentLang = lang;
+  localStorage.setItem(LANG_KEY, lang);
+}
+
+function isZh(lang) {
+  return lang !== "English";
+}
+
+// widget / 端口 label（key 为内部名，值始终英文键）
 const LABELS = {
-  conditioning: { zh: "条件张量", en: "Conditioning" },
+  conditioning: { zh: "引导器", en: "Conditioning" },
+  latent: { zh: "Latent 图像", en: "Latent" },
+  clip: { zh: "文本编码器", en: "CLIP" },
+  vae: { zh: "视频 VAE", en: "VAE" },
+  audio_vae: { zh: "音频 VAE", en: "Audio VAE" },
   seed: { zh: "种子", en: "Seed" },
   filename: { zh: "文件名", en: "Filename" },
   storage: { zh: "存储位置", en: "Storage" },
@@ -36,6 +56,7 @@ const LABELS = {
   canvas_mode: { zh: "画布模式", en: "Canvas Mode" },
   width: { zh: "宽度", en: "Width" },
   height: { zh: "高度", en: "Height" },
+  length: { zh: "帧数", en: "Length" },
   ref_image_size: { zh: "参考图缩放", en: "Ref Image Size" },
   crop_mode: { zh: "裁剪方式", en: "Crop Mode" },
   prompt_text: { zh: "提示词", en: "Prompt" },
@@ -46,6 +67,29 @@ const LABELS = {
   weights: { zh: "权重", en: "Weights" },
   rebuild: { zh: "重建目录", en: "Rebuild" },
   trigger: { zh: "触发", en: "Trigger" },
+  // 输出端口
+  saved_path: { zh: "保存路径", en: "Saved Path" },
+  metadata: { zh: "元数据", en: "Metadata" },
+  source_names: { zh: "来源名称", en: "Source Names" },
+  cleaned_prompt: { zh: "清理后提示词", en: "Cleaned Prompt" },
+  ref_images: { zh: "参考图", en: "Ref Images" },
+  ref_videos: { zh: "参考视频", en: "Ref Videos" },
+  ref_audio: { zh: "参考音频", en: "Ref Audio" },
+  catalog_json: { zh: "目录 JSON", en: "Catalog JSON" },
+  count: { zh: "数量", en: "Count" },
+  cleared_info: { zh: "清理信息", en: "Cleared Info" },
+};
+
+// combo：keys 为后端英文键（稳定不变），zh/en 为前端显示文字
+const COMBOS = {
+  storage: { keys: ["permanent", "temp"], zh: ["永久存储", "临时存储"], en: ["Permanent", "Temporary"] },
+  canvas_mode: { keys: ["auto", "max", "custom"], zh: ["自动", "最大", "自定义"], en: ["Auto", "Max", "Custom"] },
+  ref_image_size: { keys: ["match", "max"], zh: ["匹配画布", "短边2048"], en: ["Match", "Max(2048)"] },
+  crop_mode: { keys: ["disabled", "center", "contain"], zh: ["不裁剪", "居中裁剪", "等比填充"], en: ["Disabled", "Center", "Contain"] },
+};
+
+const BOOL_LABELS = {
+  rebuild: { zh: ["重建目录", "读取目录"], en: ["Rebuild", "Read"] },
 };
 
 const SLOT_LABELS = {
@@ -57,8 +101,7 @@ const SLOT_LABELS = {
 
 const TITLES = {
   ZouyuSaveSeedConditioning: { zh: "保存种子张量", en: "Save Seed Tensor" },
-  ZouyuLoadSeedConditioning: { zh: "加载种子张量", en: "Load Seed Tensor" },
-  ZouyuSeedBlender: { zh: "多种子混合器", en: "Seed Blender" },
+  ZouyuSeedLoader: { zh: "融合加载器", en: "Seed Loader" },
   ZouyuExtractSeedMedia: { zh: "提取参考媒体", en: "Extract Seed Media" },
   ZouyuSeedCatalog: { zh: "种子目录", en: "Seed Catalog" },
   ZouyuSeedPreview: { zh: "种子预览", en: "Seed Preview" },
@@ -67,25 +110,12 @@ const TITLES = {
 
 const NODE_COLORS = {
   ZouyuSaveSeedConditioning: { color: "#2e7d4f", bgcolor: "#16321f" },
-  ZouyuLoadSeedConditioning: { color: "#2f6b8f", bgcolor: "#162a38" },
-  ZouyuSeedBlender: { color: "#7a4fa0", bgcolor: "#2c1a3a" },
+  ZouyuSeedLoader: { color: "#7a4fa0", bgcolor: "#2c1a3a" },
   ZouyuExtractSeedMedia: { color: "#1f8a8a", bgcolor: "#123232" },
   ZouyuSeedCatalog: { color: "#6b6b6b", bgcolor: "#262626" },
   ZouyuSeedPreview: { color: "#b0722a", bgcolor: "#3a2812" },
   ZouyuClearTemp: { color: "#a03838", bgcolor: "#3a1616" },
 };
-
-function getLang() {
-  return localStorage.getItem(LANG_KEY) || "中文";
-}
-
-function setLang(lang) {
-  localStorage.setItem(LANG_KEY, lang);
-}
-
-function isZh(lang) {
-  return lang !== "English";
-}
 
 function slotLabel(name, lang) {
   for (const prefix in SLOT_LABELS) {
@@ -97,6 +127,19 @@ function slotLabel(name, lang) {
     }
   }
   return null;
+}
+
+function buildComboOptions(widgetName) {
+  const cb = COMBOS[widgetName];
+  const opts = {
+    values: cb.keys.slice(),
+    getOptionLabel: (value) => {
+      const idx = cb.keys.indexOf(value);
+      if (idx < 0) return value;
+      return isZh(currentLang) ? cb.zh[idx] : cb.en[idx];
+    },
+  };
+  return opts;
 }
 
 // ---------------------------------------------------------------------------
@@ -135,7 +178,7 @@ async function refreshAllFileCombos() {
 }
 
 // ---------------------------------------------------------------------------
-// i18n 应用
+// i18n 应用（仅作用于单个节点）
 // ---------------------------------------------------------------------------
 function applyLanguage(node, lang) {
   const zh = isZh(lang);
@@ -144,7 +187,7 @@ function applyLanguage(node, lang) {
   const t = TITLES[node.comfyClass || node.type];
   if (t) node.title = zh ? t.zh : t.en;
 
-  // widget label
+  // widget：按钮 / 语言选择器 / boolean / combo / label
   for (const w of node.widgets || []) {
     if (w.__zouyuButtonKey) {
       const key = w.__zouyuButtonKey;
@@ -152,11 +195,30 @@ function applyLanguage(node, lang) {
       w.name = w.label;
       continue;
     }
+    // 语言选择器本身：同步值
+    if (w.name === "language") {
+      w.value = lang;
+      const entry = LABELS[w.name];
+      if (entry) w.label = zh ? entry.zh : entry.en;
+      continue;
+    }
+    // boolean 开关 on/off
+    const bl = BOOL_LABELS[w.name];
+    if (bl && w.options) {
+      w.options.label_on = zh ? bl.zh[0] : bl.en[0];
+      w.options.label_off = zh ? bl.zh[1] : bl.en[1];
+    }
+    // combo：重设 options（getOptionLabel 依据 currentLang 返回中/英文），value 保持英文键
+    const cb = COMBOS[w.name];
+    if (cb && w.type === "combo") {
+      w.options = buildComboOptions(w.name);
+    }
+    // 普通 label
     const entry = LABELS[w.name];
     if (entry) w.label = zh ? entry.zh : entry.en;
   }
 
-  // 输入槽 label（参考图/视频/音频）
+  // 输入端口 label
   for (const inp of node.inputs || []) {
     const sl = slotLabel(inp.name, lang);
     if (sl) {
@@ -167,55 +229,41 @@ function applyLanguage(node, lang) {
     if (entry) inp.label = zh ? entry.zh : entry.en;
   }
 
+  // 输出端口 label
+  for (const out of node.outputs || []) {
+    const entry = LABELS[out.name];
+    if (entry) out.label = zh ? entry.zh : entry.en;
+  }
+
   app.graph?.setDirtyCanvas(true, false);
 }
 
-function applyLanguageToAll(lang) {
-  const nodes = app.graph?._nodes || [];
-  for (const n of nodes) {
-    if (n.comfyClass?.startsWith?.("Zouyu") || CATEGORY === n.constructor?.category) {
-      applyLanguage(n, lang);
-    }
-  }
-}
-
 // ---------------------------------------------------------------------------
-// 参考槽位自动增减（功能 1）
+// 参考槽位自动增减
 // ---------------------------------------------------------------------------
-function groupOf(name) {
-  for (const g of SLOT_GROUPS) {
-    if (new RegExp("^" + g.prefix + "\\d+$").test(name)) return g;
-  }
-  return null;
-}
-
 function refreshGroup(node, g) {
   let count = 0;
   while (count < g.max && node.inputs.some((inp) => inp.name === g.prefix + count)) count++;
 
-  // 最后一个有链接的槽
   let lastLinked = -1;
   for (let i = 0; i < count; i++) {
     const inp = node.inputs.find((x) => x.name === g.prefix + i);
     if (inp && inp.link != null) lastLinked = i;
   }
 
-  // 目标槽数：至少 1；最后一个已链接则 +1 扩展
   let target = Math.max(1, lastLinked + 1);
   if (lastLinked === count - 1 && count < g.max) target = count + 1;
 
-  // 收缩
   while (count > target) {
     const idx = node.inputs.findIndex((x) => x.name === g.prefix + (count - 1));
     if (idx >= 0) node.removeInput(idx);
     count--;
   }
-  // 扩展
   while (count < target) {
     node.addInput(g.prefix + count, g.type);
     const inp = node.inputs.find((x) => x.name === g.prefix + count);
     if (inp) {
-      const sl = slotLabel(inp.name, getLang());
+      const sl = slotLabel(inp.name, currentLang);
       if (sl) inp.label = sl;
     }
     count++;
@@ -224,7 +272,6 @@ function refreshGroup(node, g) {
 
 function refreshAllGroups(node) {
   for (const g of SLOT_GROUPS) refreshGroup(node, g);
-  // 强制重新计算节点尺寸并重绘画布
   node.size = node.computeSize();
   app.graph?.setDirtyCanvas(true, false);
 }
@@ -414,8 +461,7 @@ function setupMentionAutocomplete(node) {
 // 按钮
 // ---------------------------------------------------------------------------
 function addButton(node, keyZh, keyEn, onClick) {
-  const lang = getLang();
-  const label = isZh(lang) ? keyZh : keyEn;
+  const label = isZh(currentLang) ? keyZh : keyEn;
   const btn = node.addWidget("button", label, null, onClick);
   btn.serialize = false;
   btn.__zouyuButtonKey = { zh: keyZh, en: keyEn };
@@ -431,6 +477,7 @@ app.registerExtension({
     if (nodeData.category !== CATEGORY) return;
 
     const comfyClass = nodeData.name;
+    const hasSlots = comfyClass === "ZouyuSaveSeedConditioning" || comfyClass === "ZouyuSeedLoader";
 
     // 拦截连接变化：自动增减参考槽位
     const origOnConnectionsChange = nodeType.prototype.onConnectionsChange;
@@ -458,29 +505,29 @@ app.registerExtension({
       node.comfyClass = comfyClass;
 
       try {
-        // 节点颜色（UI 优化）
+        // 节点颜色
         const color = NODE_COLORS[comfyClass];
         if (color) {
           node.color = color.color;
           node.bgcolor = color.bgcolor;
         }
 
-        // 应用当前语言
+        // 应用当前语言（仅本节点）
         applyLanguage(node, getLang());
 
-        // 保存节点：参考槽自动增减
-        if (comfyClass === "ZouyuSaveSeedConditioning") {
+        // 动态参考槽位
+        if (hasSlots) {
           initSlots(node);
           node.__zouyuRefreshSlots = () => refreshAllGroups(node);
           node.size = node.computeSize();
         }
 
-        // 混合器：@ 自动补全
-        if (comfyClass === "ZouyuSeedBlender") {
+        // @ 自动补全（融合加载器的 prompt）
+        if (comfyClass === "ZouyuSeedLoader") {
           setupMentionAutocomplete(node);
         }
 
-        // 语言切换联动
+        // 语言切换（仅本节点）
         const langWidget = node.widgets?.find((w) => w.name === "language");
         if (langWidget) {
           const origCallback = langWidget.callback;
@@ -493,7 +540,7 @@ app.registerExtension({
         }
 
         // 文件下拉 + 刷新按钮
-        if (comfyClass === "ZouyuLoadSeedConditioning" || comfyClass === "ZouyuExtractSeedMedia" || comfyClass === "ZouyuSeedPreview") {
+        if (comfyClass === "ZouyuExtractSeedMedia" || comfyClass === "ZouyuSeedPreview") {
           const fw = node.widgets?.find((w) => w.name === "file_name");
           if (fw) {
             addButton(node, "🔄 刷新", "🔄 Refresh", async () => {
