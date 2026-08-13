@@ -549,6 +549,8 @@ def frames_to_video_bytes(frames, fps=FPS, quality=8):
         writer = imageio.get_writer(
             tmp, format="FFMPEG", fps=int(fps), codec="libx264",
             quality=quality, pixelformat="yuv420p", macro_block_size=16,
+            # veryfast 预设：烘焙种子里的参考视频时编码快 2~3 倍，画质差异可忽略
+            ffmpeg_params=["-preset", "veryfast"],
         )
         for i in range(n):
             frame = frames[i]

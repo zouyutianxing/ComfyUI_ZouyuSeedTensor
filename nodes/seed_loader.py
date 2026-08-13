@@ -21,7 +21,6 @@
 
 import os
 import re
-import gc
 import math
 
 import torch
@@ -35,12 +34,12 @@ from ..core import (
     safe_filename, now_iso,
     get_seeds_dir, get_temp_dir, scan_temp_files, resolve_seed_path, copy_to_temp,
     clear_temp_except,
-    convert_to_serializable, convert_from_serializable, move_to_device, extract_media,
+    convert_to_serializable, move_to_device, extract_media,
     bytes_to_image, image_to_bytes, collect_gpu_info, temporal_shape,
     frames_to_video_bytes, video_bytes_to_frames,
     normalize_choice, update_catalog_entry, write_sidecar_meta,
     make_progress, progress_update, log,
-    unload_all_models_thorough,          # 新增导入
+    unload_all_models_thorough,          # 阶段2 卸载
 )
 
 # 导入新编码器（reference_encoder.py 位于插件根目录）
@@ -149,8 +148,11 @@ class ZouyuSeedLoader(io.ComfyNode):
             log_lines.append(msg)
             log(msg)
 
-        # ---- 0. 彻底卸载所有外部模型（阶段1前） ----
-        unload_all_models_thorough("阶段1前：卸载所有模型（包括DiT）")
+        # ---- 0. 不强制卸载任何模型 ----
+        # 与官方节点一致，把显存调度交给 ComfyUI 模型管理器（load_models_gpu 内部
+        # 自动卸载占位模型）；手动 unload_all_models + empty_cache 只会清空 CUDA
+        # 缓存并导致后续每次加载都要重新分配/重新 patch，在 8GB 低显存下尤其拖慢。
+        logz("阶段0：直接开始（显存调度交给模型管理器，不再强制卸载）")
 
         ref_image_size = normalize_choice("ref_image_size", ref_image_size, "match")
         backup = normalize_choice("backup", backup, "permanent")
@@ -262,7 +264,8 @@ class ZouyuSeedLoader(io.ComfyNode):
                 ref_video_audios=ref_video_audios_dict,
                 ref_audios=ref_audios_dict,
             )
-            # 注意：latent 已在 GPU 上，但后续我们会将其序列化到 CPU。
+            # cond/latent 已位于 intermediate_device（GPU），后续序列化只做 CPU 副本
+            # 用于写入 .pt，GPU 原张量保留在内存中供阶段 3 直接使用。
         else:
             # 无参考，使用官方 ImageToVideo（纯文本模式）
             logz("阶段1：无参考，走 Image to Video 路径…")
@@ -396,8 +399,8 @@ class ZouyuSeedLoader(io.ComfyNode):
         # =====================================================================
         # 阶段 2：卸载全部模型（显存 + CPU 内存）
         # =====================================================================
-        del cond, latent
-        # 丢弃 clip / vae / audio_vae 的本地引用（帮助 gc 回收 CPU 内存）
+        # cond/latent 保留在内存中（编码时已在 intermediate_device），
+        # 不再走 存盘→回读 的往返；.pt 文件仅作为烘焙产物/下次 @引用 的融合源。
         del clip, vae, audio_vae
         unload_all_models_thorough("阶段2：卸载全部模型（VAE/CLIP）")
 
@@ -411,10 +414,8 @@ class ZouyuSeedLoader(io.ComfyNode):
             except Exception as exc:  # noqa: BLE001
                 logz(f"加载视频模型失败（将交给采样器处理）: {exc}")
 
-        # 解包：从 .pt 还原 conditioning + latent，并移到 GPU
-        logz("解包：还原 conditioning + latent 到 GPU…")
-        cond = convert_from_serializable(cond_cpu)
-        latent = convert_from_serializable(latent_cpu)
+        # 解包：直接复用内存中的 conditioning + latent（免去 .pt 回读与二次搬运）
+        logz("还原 conditioning + latent（内存直通，免去 .pt 回读）…")
         device = model_management.intermediate_device()
         cond = move_to_device(cond, device)
         latent = move_to_device(latent, device)
@@ -452,7 +453,12 @@ class ZouyuSeedLoader(io.ComfyNode):
         for fname in scan_temp_files():
             path = os.path.join(get_temp_dir(), fname)
             try:
-                data = torch.load(path, map_location="cpu", weights_only=False)
+                # weights_only=True：种子包内只有张量/字典/bytes 等纯数据，
+                # 反序列化更快且不执行任意 pickle 代码（旧格式文件回退全量加载）
+                try:
+                    data = torch.load(path, map_location="cpu", weights_only=True)
+                except Exception:
+                    data = torch.load(path, map_location="cpu", weights_only=False)
             except Exception as exc:  # noqa: BLE001
                 logz(f"跳过无法读取的临时文件 {fname}: {exc}")
                 continue

@@ -143,14 +143,12 @@ def encode_references_to_cond(clip, vae, audio_vae, prompt, width, height, lengt
         ref_items.append({"type": "audio"})
         ref_blocks.append({"kind": "audio", "ref_audio_t": ref_audio_t, "audio_latent": audio_latent})
 
-    # ------------------------------------------------------------------
-    # 关键内存优化：卸载 VAE（视频 ~5GB + 音频 ~0.6GB），为文本编码腾出显存。
-    # 否则视频 VAE + 音频 VAE + Qwen3-VL 文本编码器(~15GB) 三者同时驻留，
-    # 8GB 显存必然 OOM。参考 latent 已保存在 ref_blocks 中，卸载 VAE 不影响结果。
-    # ------------------------------------------------------------------
-    comfy.model_management.unload_all_models()
-    comfy.model_management.soft_empty_cache(force=True)
-
+    # 文本编码与官方 MiniMaxH3ReferenceToVideo 完全一致：直接调用 clip。
+    # 8GB 低显存下不需要手动卸载 VAE：clip.encode_from_tokens_scheduled 内部会走
+    # load_models_gpu()，模型管理器自动按需把 VAE 挪出显存、给 Qwen3-VL 腾地方，
+    # 并复用 CUDA 缓存分配器。手动 unload_all_models() + soft_empty_cache(force=True)
+    # 反而会把已缓存的显存块全部释放、注销全部 LoadedModel，导致 clip 加载时
+    # 重新分配/重新 patch（官方节点没有这一步，这也是官方更快的原因之一）。
     tokens = clip.tokenize(prompt, minimax_ref_items=ref_items)
     cond = clip.encode_from_tokens_scheduled(tokens)
     if ref_blocks:
