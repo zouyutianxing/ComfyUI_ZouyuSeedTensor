@@ -1,5 +1,5 @@
 """
-ComfyUI_ZouyuSeedTensor - 种子张量缓存与混合系统
+ComfyUI_ZouyuSeedTensor - 种子张量缓存与混合系统（V3 API）
 
 将 MiniMax H3 视频生成过程中的 conditioning 张量和种子打包保存，
 支持通过提示词 @引用 混合多个种子张量文件进行联合生成。
@@ -12,17 +12,26 @@ ComfyUI_ZouyuSeedTensor - 种子张量缓存与混合系统
 
 from aiohttp import web
 
-from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+from comfy_api.latest import ComfyExtension
+
+from .nodes import ALL_NODES
 from .core import (
     get_seeds_dir, get_temp_dir,
     scan_seed_files, scan_temp_files, scan_all_seed_files,
     load_catalog, rebuild_catalog, clear_temp_dir,
 )
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
-
-# 前端扩展目录（自动增减槽位、中英文切换、@ 下拉、预览）
+# 前端扩展目录（中英文切换、@ 下拉、预览、按钮）
 WEB_DIRECTORY = "./web"
+
+
+class ZouyuSeedTensorExtension(ComfyExtension):
+    async def get_node_list(self):
+        return ALL_NODES
+
+
+async def comfy_entrypoint() -> ComfyExtension:
+    return ZouyuSeedTensorExtension()
 
 
 # ---------------------------------------------------------------------------
