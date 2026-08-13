@@ -37,6 +37,7 @@ from ..core import (
     clear_temp_except,
     convert_to_serializable, convert_from_serializable, move_to_device, extract_media,
     bytes_to_image, image_to_bytes, collect_gpu_info, temporal_shape,
+    frames_to_video_bytes, video_bytes_to_frames,
     normalize_choice, update_catalog_entry, write_sidecar_meta,
     make_progress, progress_update, log,
     unload_all_models_thorough,          # 新增导入
@@ -331,9 +332,21 @@ class ZouyuSeedLoader(io.ComfyNode):
             },
         }
 
+        # 参考视频改用 H.264 压缩存储（大幅减小种子文件体积），记录原始尺寸便于解码还原
+        packed_videos = []
+        for v in all_videos:
+            if v is None or getattr(v, "shape", None) is None or v.shape[0] == 0:
+                continue
+            b = frames_to_video_bytes(v[..., :3])
+            if b is not None:
+                packed_videos.append({
+                    "bytes": b,
+                    "shape": [int(v.shape[1]), int(v.shape[2])],
+                })
+
         media = {
             "ref_images": {"format": "jpeg", "bytes": ref_image_bytes, "shapes": ref_image_shapes},
-            "ref_videos": [v[..., :3].detach().to(torch.float16).cpu() for v in all_videos],
+            "ref_videos": packed_videos,
             "ref_video_audios": [a for a in all_video_audios if isinstance(a, dict) and a.get("waveform") is not None],
             "ref_audios": all_audios,
         }
@@ -450,12 +463,26 @@ class ZouyuSeedLoader(io.ComfyNode):
             if isinstance(img_data, dict) and img_data.get("bytes"):
                 try:
                     imgs = bytes_to_image(img_data["bytes"], fmt=img_data.get("format", "jpeg"))
+                    shapes = img_data.get("shapes", [])
                     for i in range(imgs.shape[0]):
-                        images.append(imgs[i:i + 1])
+                        img = imgs[i:i + 1]
+                        # 按原始尺寸裁剪回（bytes_to_image 会 pad 到最大尺寸）
+                        if i < len(shapes):
+                            h, w = int(shapes[i][0]), int(shapes[i][1])
+                            if h > 0 and w > 0:
+                                img = img[:, :h, :w, :]
+                        images.append(img)
                 except Exception as exc:  # noqa: BLE001
                     logz(f"解码参考图失败 {fname}: {exc}")
             for v in media.get("ref_videos", []):
-                if isinstance(v, torch.Tensor):
+                if isinstance(v, dict) and v.get("bytes") is not None:
+                    # 新格式：H.264 字节流，解码回帧
+                    frames = video_bytes_to_frames(v["bytes"], original_shape=v.get("shape"))
+                    if frames is not None and frames.shape[0] > 0:
+                        videos.append(frames)
+                        video_audios.append(None)
+                elif isinstance(v, torch.Tensor):
+                    # 旧格式：直接存张量
                     videos.append(v.float())
                     video_audios.append(None)
             for va in media.get("ref_video_audios", []):

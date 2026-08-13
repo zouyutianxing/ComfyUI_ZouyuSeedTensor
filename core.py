@@ -495,7 +495,130 @@ def bytes_to_image(bytes_list, fmt="jpeg"):
         images.append(np.array(img, dtype=np.float32) / 255.0)
     if not images:
         return torch.zeros((0, 1, 1, 3), dtype=torch.float32)
-    return torch.from_numpy(np.stack(images, axis=0))
+    # 不同尺寸的图像无法直接 np.stack，统一 pad 到最大 H/W（黑边用 0 填充）。
+    # 调用方若持有原始 shapes（media.ref_images.shapes），可据此裁剪回原尺寸，无损。
+    max_h = max(int(im.shape[0]) for im in images)
+    max_w = max(int(im.shape[1]) for im in images)
+    padded = []
+    for im in images:
+        if im.shape[0] == max_h and im.shape[1] == max_w:
+            padded.append(im)
+        else:
+            canvas = np.zeros((max_h, max_w, 3), dtype=np.float32)
+            canvas[:im.shape[0], :im.shape[1], :] = im
+            padded.append(canvas)
+    return torch.from_numpy(np.stack(padded, axis=0))
+
+
+# ---------------------------------------------------------------------------
+# 视频帧编解码（H.264，用于压缩种子文件中的参考视频）
+# ---------------------------------------------------------------------------
+
+def frames_to_video_bytes(frames, fps=FPS, quality=8):
+    """把视频帧序列 [N,H,W,3] float(0-1) 编码为 H.264 mp4 字节流。
+
+    相比直接存 float16 原始帧，H.264 可缩小 50~100 倍；参考视频在重新编码时
+    本就会缩放到画布尺寸再进 VAE，轻微有损对最终生成质量几乎无影响。
+    返回 bytes；失败时回退为 uint8 张量（仍比 float16 小一半）。
+    """
+    if frames is None:
+        return None
+    try:
+        import numpy as np
+        import imageio.v2 as imageio
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ZouyuSeedTensor] 视频编码库不可用，回退 uint8 存储: {exc}")
+        return _frames_to_uint8(frames)
+
+    frames = frames[..., :3].detach().cpu()
+    n = int(frames.shape[0])
+    h, w = int(frames.shape[1]), int(frames.shape[2])
+    if n == 0:
+        return None
+    # H.264 yuv420p 需要偶数尺寸；imageio 默认 macro_block_size=16，
+    # 为避免其内部 resize 导致像素错位，这里预先 pad 到 16 的倍数，
+    # 解码后由 original_shape 裁剪回原尺寸（黑边被裁掉，无损）。
+    out_h = ((h + 15) // 16) * 16
+    out_w = ((w + 15) // 16) * 16
+
+    fd, tmp = None, None
+    try:
+        import tempfile
+        fd, tmp = tempfile.mkstemp(suffix=".mp4")
+        os.close(fd)
+        writer = imageio.get_writer(
+            tmp, format="FFMPEG", fps=int(fps), codec="libx264",
+            quality=quality, pixelformat="yuv420p", macro_block_size=16,
+        )
+        for i in range(n):
+            frame = frames[i]
+            if out_h != h or out_w != w:
+                canvas = torch.zeros((out_h, out_w, 3), dtype=frame.dtype)
+                canvas[:h, :w, :] = frame
+                frame = canvas
+            arr = (frame.clamp(0.0, 1.0) * 255.0 + 0.5).to(torch.uint8).numpy()
+            writer.append_data(arr)
+        writer.close()
+        with open(tmp, "rb") as f:
+            return f.read()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ZouyuSeedTensor] 视频 H.264 编码失败，回退 uint8 存储: {exc}")
+        return _frames_to_uint8(frames)
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def _frames_to_uint8(frames):
+    """回退方案：uint8 存储（比 float16 小一半）"""
+    return (frames[..., :3].clamp(0.0, 1.0) * 255.0 + 0.5).to(torch.uint8).detach().cpu()
+
+
+def video_bytes_to_frames(data, original_shape=None):
+    """把 H.264 mp4 字节流（或旧版 uint8/float16 张量）解码回帧序列 [N,H,W,3] float(0-1)。
+
+    original_shape: (h, w)，若提供则裁剪回原始尺寸（H.264 会 pad 到偶数）。
+    """
+    if data is None:
+        return None
+    # 向后兼容旧格式：直接存张量
+    if torch.is_tensor(data):
+        return data[..., :3].float()
+    if isinstance(data, (bytes, bytearray)):
+        try:
+            import numpy as np
+            import imageio.v2 as imageio
+            fd, tmp = None, None
+            import tempfile
+            fd, tmp = tempfile.mkstemp(suffix=".mp4")
+            os.close(fd)
+            try:
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                reader = imageio.get_reader(tmp, format="FFMPEG")
+                frames = [f for f in reader]
+                reader.close()
+                if not frames:
+                    return None
+                arr = np.stack(frames, axis=0).astype(np.float32) / 255.0
+                out = torch.from_numpy(arr)
+                if original_shape:
+                    h, w = int(original_shape[0]), int(original_shape[1])
+                    out = out[:, :h, :w, :]
+                return out
+            finally:
+                if tmp:
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ZouyuSeedTensor] 视频解码失败: {exc}")
+            return None
+    return None
 
 
 # ---------------------------------------------------------------------------

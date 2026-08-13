@@ -9,7 +9,7 @@ from comfy_api.latest import io
 
 from ..core import (
     scan_all_seed_files, resolve_seed_path,
-    extract_structure, extract_media, bytes_to_image, log,
+    extract_structure, extract_media, bytes_to_image, video_bytes_to_frames, log,
 )
 
 
@@ -55,7 +55,16 @@ class ZouyuExtractSeedMedia(io.ComfyNode):
         videos = media.get("ref_videos", []) if isinstance(media, dict) else []
         if videos:
             try:
-                ref_videos = torch.cat([v.float() for v in videos], dim=0)
+                decoded = []
+                for v in videos:
+                    if isinstance(v, dict) and v.get("bytes") is not None:
+                        f = video_bytes_to_frames(v["bytes"], original_shape=v.get("shape"))
+                        if f is not None and f.shape[0] > 0:
+                            decoded.append(f.float())
+                    elif isinstance(v, torch.Tensor):
+                        decoded.append(v.float())
+                if decoded:
+                    ref_videos = torch.cat(decoded, dim=0)
             except Exception:
                 ref_videos = torch.zeros((0, 1, 1, 3), dtype=torch.float32)
 

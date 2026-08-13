@@ -23,6 +23,7 @@ from ..core import (
     convert_to_serializable,
     resolve_canvas, ref_target_dims, preprocess_image,
     image_to_bytes, collect_gpu_info, temporal_shape,
+    frames_to_video_bytes,
     normalize_choice, update_catalog_entry, write_sidecar_meta,
     make_progress, progress_update, notify_files_refresh, log,
 )
@@ -129,7 +130,12 @@ class ZouyuSaveSeedConditioning(io.ComfyNode):
         for v in ref_video_list:
             if v is None or getattr(v, "shape", None) is None or v.shape[0] == 0:
                 continue
-            ref_video_tensors.append(v[..., :3].detach().to(torch.float16).cpu())
+            b = frames_to_video_bytes(v[..., :3])
+            if b is not None:
+                ref_video_tensors.append({
+                    "bytes": b,
+                    "shape": [int(v.shape[1]), int(v.shape[2])],
+                })
 
         def _serialize_audio(audio):
             if not isinstance(audio, dict):
