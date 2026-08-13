@@ -7,32 +7,38 @@
 2. 从临时目录所有 .pt 提取参考媒体（图片/视频/音频）
 3. 将新提供的参考提示词 / 图片 / 视频 / 音频 打包成张量文件（自动存入临时目录）
 4. 用内置 MiniMax H3 Reference to Video 根据新提示词重新解码编码
-5. 将重新编码结果全部打包成一个张量文件，清空临时目录内其他文件，卸载显存/内存
+5. 将重新编码结果打包成一个张量文件，清空临时目录其他文件，卸载显存/内存
 6. 输出「引导器(conditioning)」+「Latent」给自定义采样器
 
-输入 = 模型(clip / vae / audio_vae)；输出 = 引导器 + Latent。
+- 时长(duration) + 帧率(fps) 控制，替代固定帧数
+- 视频端口直接接收 VIDEO（内部提取帧 + 音轨）
+- 打包前可备份到永久/临时目录
+- 输出前卸载 clip/vae/audio_vae 显存
 """
 
 import os
 import re
+import gc
 
 import torch
+import comfy.model_management as model_management
 
 from ..core import (
     PLUGIN_VERSION,
     FPS,
     MAX_REFERENCE_IMAGES, MAX_REFERENCE_VIDEOS, MAX_REFERENCE_AUDIOS,
     safe_filename, now_iso,
-    get_temp_dir, scan_temp_files, resolve_seed_path, copy_to_temp,
+    get_seeds_dir, get_temp_dir, scan_temp_files, resolve_seed_path, copy_to_temp,
     clear_temp_except, free_memory,
     convert_to_serializable, extract_media,
     bytes_to_image, image_to_bytes, collect_gpu_info, temporal_shape,
-    normalize_choice, make_progress, progress_update, log,
+    normalize_choice, update_catalog_entry, write_sidecar_meta,
+    make_progress, progress_update, log,
 )
 
 
 class ZouyuSeedLoader:
-    """融合加载器：@复制 + 参考媒体提取 + Reference to Video 重新编码 + 打包 + 清空 + 卸载。"""
+    """融合加载器：@复制 + 媒体提取 + Reference to Video 重新编码 + 打包 + 备份 + 清空 + 卸载。"""
 
     _AT_PATTERN = re.compile(r'@([\w\-.\u4e00-\u9fff]+)')
 
@@ -42,27 +48,36 @@ class ZouyuSeedLoader:
         # 参考图动态端口（最多 50 个）
         for i in range(MAX_REFERENCE_IMAGES):
             optional[f"reference_image_{i}"] = ("IMAGE", {"tooltip": f"新参考图 {i + 1}"})
+        # 参考视频（直接接收 VIDEO，内部提取帧 + 音轨）
         for i in range(MAX_REFERENCE_VIDEOS):
-            optional[f"ref_video_{i}"] = ("IMAGE", {"tooltip": f"新参考视频 {i + 1}（帧序列，24fps）"})
-            optional[f"ref_video_audio_{i}"] = ("AUDIO", {"tooltip": f"新参考视频 {i + 1} 的配乐"})
+            optional[f"ref_video_{i}"] = ("VIDEO", {"tooltip": f"新参考视频 {i + 1}（直接连 LoadVideo，内部提取帧与音轨）"})
+        # 参考音频（直接上传音频，内部用 audio_vae 编码）
         for i in range(MAX_REFERENCE_AUDIOS):
-            optional[f"ref_audio_{i}"] = ("AUDIO", {"tooltip": f"新参考音频 {i + 1}"})
+            optional[f"ref_audio_{i}"] = ("AUDIO", {"tooltip": f"新参考音频 {i + 1}（直接上传音频）"})
 
         return {
             "required": {
                 "clip": ("CLIP", {"tooltip": "MiniMax H3 文本编码器（Qwen3-VL）"}),
                 "vae": ("VAE", {"tooltip": "MiniMax H3 视频 VAE"}),
                 "audio_vae": ("VAE", {"tooltip": "MiniMax H3 音频 VAE（有参考时必需）"}),
+                "model": ("MODEL", {"tooltip": "MiniMax H3 模型（可选，用于溯源记录）"}),
                 "prompt": ("STRING", {
                     "default": "", "multiline": True,
-                    "tooltip": "提示词。使用 @文件名 引用永久目录中的种子张量（会自动复制到临时目录并重新编码）"
+                    "tooltip": "提示词。使用 @文件名 引用永久目录中的种子张量（自动复制到临时目录并重新编码）"
                 }),
                 "width": ("INT", {"default": 1344, "min": 32, "max": 8192, "step": 32}),
                 "height": ("INT", {"default": 768, "min": 32, "max": 8192, "step": 32}),
-                "length": ("INT", {"default": 124, "min": 5, "max": 3600, "step": 17}),
+                "duration": ("FLOAT", {"default": 5.0, "min": 0.1, "max": 3600.0, "step": 0.1,
+                                       "tooltip": "视频总时长（秒），优先于提示词中的时长"}),
+                "fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 120.0, "step": 1.0,
+                                  "tooltip": "最终输出视频帧率"}),
                 "ref_image_size": (["match", "max"], {"default": "match"}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
-                "filename": ("STRING", {"default": "fused_seed", "tooltip": "重新编码后打包的输出文件名（存入临时目录）"}),
+                "filename": ("STRING", {"default": "fused_seed", "tooltip": "重新编码后打包的输出文件名"}),
+                "backup": (["permanent", "temp", "none"], {
+                    "default": "permanent",
+                    "tooltip": "打包前备份位置：permanent=永久目录(长期保留)；temp=临时目录(视频生成结束后清空)；none=不备份"
+                }),
                 "language": (["中文", "English"], {"default": "中文"}),
             },
             "optional": optional,
@@ -82,6 +97,26 @@ class ZouyuSeedLoader:
             return args[0], args[1]
         raise RuntimeError(f"MiniMax H3 conditioning 返回异常: {type(out)!r}")
 
+    @staticmethod
+    def _video_to_frames(v):
+        """把 VIDEO 对象（或 IMAGE 帧序列）转为 (frames, audio)。"""
+        if v is None:
+            return None, None
+        # Video 对象（LoadVideo 输出）
+        if hasattr(v, "get_components"):
+            try:
+                comps = v.get_components()
+                frames = comps.images  # [F,H,W,C]
+                audio = getattr(comps, "audio", None)
+                return frames, audio
+            except Exception as exc:  # noqa: BLE001
+                log(f"提取视频帧失败: {exc}")
+                return None, None
+        # IMAGE 帧序列
+        if torch.is_tensor(v):
+            return v, None
+        return None, None
+
     def _collect_new_refs(self, kwargs):
         images, videos, video_audios, audios = [], [], [], []
         for i in range(MAX_REFERENCE_IMAGES):
@@ -90,11 +125,11 @@ class ZouyuSeedLoader:
                 images.append(img)
         for i in range(MAX_REFERENCE_VIDEOS):
             v = kwargs.get(f"ref_video_{i}")
-            if v is not None and getattr(v, "shape", None) and v.shape[0] > 0:
-                videos.append(v)
-            va = kwargs.get(f"ref_video_audio_{i}")
-            if isinstance(va, dict) and va.get("waveform") is not None:
-                video_audios.append(va)
+            frames, audio = self._video_to_frames(v)
+            if frames is not None and getattr(frames, "shape", None) and frames.shape[0] > 0:
+                videos.append(frames)
+                if audio is not None:
+                    video_audios.append(audio)
         for i in range(MAX_REFERENCE_AUDIOS):
             a = kwargs.get(f"ref_audio_{i}")
             if isinstance(a, dict) and a.get("waveform") is not None:
@@ -133,13 +168,25 @@ class ZouyuSeedLoader:
                     audios.append(a)
         return images, videos, video_audios, audios
 
-    def execute(self, clip, vae, audio_vae, prompt, width, height, length,
-                ref_image_size="match", seed=0, filename="fused_seed", language="中文",
-                **kwargs):
+    def execute(self, clip, vae, audio_vae, model, prompt, width, height, duration, fps,
+                ref_image_size="match", seed=0, filename="fused_seed", backup="permanent",
+                language="中文", **kwargs):
         zh = (language != "English")
         ref_image_size = normalize_choice("ref_image_size", ref_image_size, "match")
+        backup = normalize_choice("backup", backup, "permanent")
 
         prompt = prompt or ""
+        try:
+            fps = float(fps)
+        except (TypeError, ValueError):
+            fps = FPS
+        try:
+            duration = float(duration)
+        except (TypeError, ValueError):
+            duration = 5.0
+
+        # 帧数 = 时长 × 帧率
+        frame_count = max(5, int(round(duration * fps)))
 
         # ---- 1. 解析 @引用，复制永久 -> 临时 ----
         refs = self._AT_PATTERN.findall(prompt)
@@ -197,14 +244,14 @@ class ZouyuSeedLoader:
             if audio_vae is None:
                 raise ValueError("[ZouyuSeedTensor] 参考模式需要 audio_vae（音频 VAE）")
             out = MiniMaxH3ReferenceToVideo.execute(
-                clip, vae, audio_vae, cleaned_prompt, width, height, length, ref_image_size,
+                clip, vae, audio_vae, cleaned_prompt, width, height, frame_count, ref_image_size,
                 ref_images=ref_images_dict,
                 ref_videos=ref_videos_dict,
                 ref_video_audios=ref_video_audios_dict,
                 ref_audios=ref_audios_dict,
             )
         else:
-            out = MiniMaxH3ImageToVideo.execute(clip, vae, cleaned_prompt, width, height, length)
+            out = MiniMaxH3ImageToVideo.execute(clip, vae, cleaned_prompt, width, height, frame_count)
 
         cond, latent = self._unpack(out)
         progress_update(pbar, 1)
@@ -223,17 +270,26 @@ class ZouyuSeedLoader:
             ref_image_bytes.extend(data_list)
             ref_image_shapes.extend([[int(img.shape[1]), int(img.shape[2])]] * len(data_list))
 
-        frame_count, latent_t, audio_t = temporal_shape(length)
+        aligned_frames, latent_t, audio_t = temporal_shape(frame_count)
+
+        # 模型溯源信息
+        model_info = ""
+        if model is not None:
+            try:
+                model_info = str(getattr(model, "model", model).__class__.__name__)
+            except Exception:
+                model_info = str(type(model))
 
         metadata = {
             "seed": int(seed),
             "prompt_text": cleaned_prompt,
-            "duration": round(frame_count / FPS, 2),
+            "duration": round(float(duration), 2),
+            "fps": round(float(fps), 2),
             "width": int(width),
             "height": int(height),
             "resolution": {"width": int(width), "height": int(height), "canvas_mode": "custom"},
             "frame_rate": FPS,
-            "frame_count": int(frame_count),
+            "frame_count": int(aligned_frames),
             "latent_t": int(latent_t),
             "audio_t": int(audio_t),
             "ref_image_size": ref_image_size,
@@ -243,6 +299,7 @@ class ZouyuSeedLoader:
             "ref_video_count": len(all_videos),
             "ref_video_audio_count": len(all_video_audios),
             "ref_audio_count": len(all_audios),
+            "model": model_info,
             "gpu": collect_gpu_info(),
             "provenance": {
                 "plugin": "ComfyUI_ZouyuSeedTensor",
@@ -270,19 +327,47 @@ class ZouyuSeedLoader:
         }
         torch.save(wrapper, temp_path)
 
-        # ---- 8. 清空临时目录其他文件（仅保留新打包的张量）----
+        # ---- 8. 备份（需求 11）----
+        if backup == "permanent":
+            perm_path = os.path.join(get_seeds_dir(), f"{safe_name}.pt")
+            try:
+                import shutil
+                shutil.copy2(temp_path, perm_path)
+                entry = {
+                    "name": safe_name,
+                    "file": f"{safe_name}.pt",
+                    "seed": int(seed),
+                    "prompt": (cleaned_prompt or "")[:200],
+                    "width": int(width),
+                    "height": int(height),
+                    "duration": round(float(duration), 2),
+                    "fps": round(float(fps), 2),
+                    "size_mb": round(os.path.getsize(perm_path) / (1024 * 1024), 2),
+                    "saved_at": now_iso(),
+                    "ref_image_count": len(ref_image_bytes),
+                    "ref_video_count": len(all_videos),
+                    "ref_audio_count": len(all_audios),
+                    "plugin_version": PLUGIN_VERSION,
+                }
+                write_sidecar_meta(f"{safe_name}.pt", entry)
+                update_catalog_entry(safe_name, entry)
+                log(f"已备份到永久目录: {perm_path}" if zh else f"Backed up to permanent: {perm_path}")
+            except Exception as exc:  # noqa: BLE001
+                log(f"备份失败: {exc}" if zh else f"Backup failed: {exc}")
+
+        # ---- 9. 清空临时目录其他文件（仅保留新打包的张量）----
         removed = clear_temp_except(f"{safe_name}.pt")
 
-        # ---- 9. 卸载显存与内存 ----
+        # ---- 10. 卸载显存与内存（需求 8）----
         free_memory()
 
         mb = os.path.getsize(temp_path) / (1024 * 1024)
 
         if zh:
-            log(f"融合完成 -> {temp_path} ({mb:.1f} MB, 参考图={len(ref_image_bytes)}, "
-                f"视频={len(all_videos)}, 音频={len(all_audios)}, 已清空临时 {removed} 项)")
+            log(f"融合完成 -> {temp_path} ({mb:.1f} MB, 时长={duration}s@{fps}fps, 参考图={len(ref_image_bytes)}, "
+                f"视频={len(all_videos)}, 音频={len(all_audios)}, 清空临时 {removed} 项, 备份={backup})")
         else:
-            log(f"Fusion done -> {temp_path} ({mb:.1f} MB, images={len(ref_image_bytes)}, "
-                f"videos={len(all_videos)}, audios={len(all_audios)}, cleared {removed})")
+            log(f"Fusion done -> {temp_path} ({mb:.1f} MB, dur={duration}s@{fps}fps, images={len(ref_image_bytes)}, "
+                f"videos={len(all_videos)}, audios={len(all_audios)}, cleared {removed}, backup={backup})")
 
         return (cond, latent)

@@ -1,22 +1,22 @@
 {
   "id": "zouyu-seed-loader-example",
   "revision": 0,
-  "last_node_id": 9,
-  "last_link_id": 10,
+  "last_node_id": 55,
+  "last_link_id": 23,
   "nodes": [
     {
-      "id": 1,
+      "id": 19,
       "type": "UNETLoader",
       "pos": [
-        -800,
-        40
+        -1110,
+        0
       ],
       "size": [
         340,
         82
       ],
       "flags": {},
-      "order": 0,
+      "order": 19,
       "mode": 0,
       "inputs": [
         {
@@ -48,23 +48,23 @@
         "Node name for S&R": "UNETLoader"
       },
       "widgets_values": [
-        "minimax_h3_*.safetensors",
+        "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
         "default"
       ]
     },
     {
-      "id": 2,
+      "id": 20,
       "type": "CLIPLoader",
       "pos": [
-        -800,
-        180
+        -1110,
+        150
       ],
       "size": [
         340,
         130
       ],
       "flags": {},
-      "order": 1,
+      "order": 20,
       "mode": 0,
       "inputs": [
         {
@@ -104,24 +104,24 @@
         "Node name for S&R": "CLIPLoader"
       },
       "widgets_values": [
-        "qwen3vl_32b_minimax_h3_*.safetensors",
-        "minimax_h3",
+        "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "minimax",
         "default"
       ]
     },
     {
-      "id": 3,
+      "id": 21,
       "type": "VAELoader",
       "pos": [
-        -800,
-        360
+        -1110,
+        320
       ],
       "size": [
         340,
         58
       ],
       "flags": {},
-      "order": 2,
+      "order": 21,
       "mode": 0,
       "inputs": [
         {
@@ -145,22 +145,22 @@
         "Node name for S&R": "VAELoader"
       },
       "widgets_values": [
-        "minimax_h3_vae_*.safetensors"
+        "minimax_h3_vae.safetensors"
       ]
     },
     {
-      "id": 4,
+      "id": 22,
       "type": "VAELoader",
       "pos": [
-        -800,
-        470
+        -1120,
+        450
       ],
       "size": [
         340,
         58
       ],
       "flags": {},
-      "order": 3,
+      "order": 22,
       "mode": 0,
       "inputs": [
         {
@@ -184,22 +184,250 @@
         "Node name for S&R": "VAELoader"
       },
       "widgets_values": [
-        "minimax_h3_audio_vae_*.safetensors"
+        "minimax_h3_audio_vae.safetensors"
+      ]
+    },
+    {
+      "id": 53,
+      "type": "ResolutionSelector",
+      "pos": [
+        -1010,
+        600
+      ],
+      "size": [
+        200,
+        120
+      ],
+      "flags": {},
+      "order": 53,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "aspect_ratio",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "aspect_ratio"
+          }
+        },
+        {
+          "name": "megapixels",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "megapixels"
+          }
+        },
+        {
+          "name": "multiple",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "multiple"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "width",
+          "type": "INT",
+          "links": []
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "links": []
+        }
+      ],
+      "title": "Resolution Selector",
+      "properties": {
+        "Node name for S&R": "ResolutionSelector"
+      },
+      "widgets_values": [
+        "16:9 (Widescreen)",
+        0.4,
+        32
+      ]
+    },
+    {
+      "id": 55,
+      "type": "PrimitiveFloat",
+      "pos": [
+        -1010,
+        820
+      ],
+      "size": [
+        160,
+        40
+      ],
+      "flags": {},
+      "order": 55,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "value",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "value"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "FLOAT",
+          "type": "FLOAT",
+          "links": []
+        }
+      ],
+      "title": "Float (Duration)",
+      "properties": {
+        "Node name for S&R": "PrimitiveFloat"
+      },
+      "widgets_values": [
+        5.0
+      ]
+    },
+    {
+      "id": 16,
+      "type": "LoadImage",
+      "pos": [
+        -700,
+        1070
+      ],
+      "size": [
+        300,
+        250
+      ],
+      "flags": {},
+      "order": 16,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": null,
+          "widget": {
+            "name": "image"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": []
+        }
+      ],
+      "title": "参考图 1",
+      "properties": {
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "ref1.png"
+      ]
+    },
+    {
+      "id": 17,
+      "type": "LoadImage",
+      "pos": [
+        -400,
+        1070
+      ],
+      "size": [
+        300,
+        250
+      ],
+      "flags": {},
+      "order": 17,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": null,
+          "widget": {
+            "name": "image"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": []
+        }
+      ],
+      "title": "参考图 2",
+      "properties": {
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "ref2.png"
+      ]
+    },
+    {
+      "id": 18,
+      "type": "LoadVideo",
+      "pos": [
+        -1020,
+        950
+      ],
+      "size": [
+        300,
+        60
+      ],
+      "flags": {},
+      "order": 18,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "file",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "file"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "VIDEO",
+          "type": "VIDEO",
+          "links": []
+        }
+      ],
+      "title": "参考视频",
+      "properties": {
+        "Node name for S&R": "LoadVideo"
+      },
+      "widgets_values": [
+        "video.mp4"
       ]
     },
     {
       "id": 5,
       "type": "ZouyuSeedLoader",
       "pos": [
-        -340,
-        120
+        -230,
+        160
       ],
       "size": [
         420,
-        300
+        340
       ],
       "flags": {},
-      "order": 4,
+      "order": 5,
       "mode": 0,
       "inputs": [
         {
@@ -215,6 +443,11 @@
         {
           "name": "audio_vae",
           "type": "VAE",
+          "link": null
+        },
+        {
+          "name": "model",
+          "type": "MODEL",
           "link": null
         },
         {
@@ -242,11 +475,19 @@
           }
         },
         {
-          "name": "length",
-          "type": "INT",
+          "name": "duration",
+          "type": "FLOAT",
           "link": null,
           "widget": {
-            "name": "length"
+            "name": "duration"
+          }
+        },
+        {
+          "name": "fps",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "fps"
           }
         },
         {
@@ -274,6 +515,14 @@
           }
         },
         {
+          "name": "backup",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "backup"
+          }
+        },
+        {
           "name": "language",
           "type": "COMBO",
           "link": null,
@@ -284,10 +533,22 @@
         {
           "name": "reference_image_0",
           "type": "IMAGE",
-          "link": null,
-          "widget": {
-            "name": "reference_image_0"
-          }
+          "link": null
+        },
+        {
+          "name": "reference_image_1",
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "name": "ref_video_0",
+          "type": "VIDEO",
+          "link": null
+        },
+        {
+          "name": "ref_audio_0",
+          "type": "AUDIO",
+          "link": null
         }
       ],
       "outputs": [
@@ -310,91 +571,69 @@
         "@shot_001 一个角色在森林中行走",
         1344,
         768,
-        124,
+        5.0,
+        24.0,
         "match",
         0,
         "fused_seed",
+        "permanent",
         "中文"
       ]
     },
     {
-      "id": 6,
-      "type": "ConditioningZeroOut",
+      "id": 43,
+      "type": "RandomNoise",
       "pos": [
-        -340,
-        500
+        280,
+        20
       ],
       "size": [
-        220,
+        200,
         40
       ],
       "flags": {},
-      "order": 5,
+      "order": 43,
       "mode": 0,
       "inputs": [
         {
-          "name": "conditioning",
-          "type": "CONDITIONING",
-          "link": null
+          "name": "noise_seed",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "noise_seed"
+          }
         }
       ],
       "outputs": [
         {
-          "name": "CONDITIONING",
-          "type": "CONDITIONING",
+          "name": "NOISE",
+          "type": "NOISE",
           "links": []
         }
       ],
-      "title": "空 negative",
+      "title": "RandomNoise",
       "properties": {
-        "Node name for S&R": "ConditioningZeroOut"
+        "Node name for S&R": "RandomNoise"
       },
-      "widgets_values": []
+      "widgets_values": [
+        0
+      ]
     },
     {
-      "id": 7,
-      "type": "KSampler",
+      "id": 44,
+      "type": "KSamplerSelect",
       "pos": [
-        120,
-        120
+        260,
+        170
       ],
       "size": [
-        320,
-        300
+        200,
+        40
       ],
       "flags": {},
-      "order": 6,
+      "order": 44,
       "mode": 0,
       "inputs": [
-        {
-          "name": "model",
-          "type": "MODEL",
-          "link": null
-        },
-        {
-          "name": "seed",
-          "type": "INT",
-          "link": null,
-          "widget": {
-            "name": "seed"
-          }
-        },
-        {
-          "name": "steps",
-          "type": "INT",
-          "link": null,
-          "widget": {
-            "name": "steps"
-          }
-        },
-        {
-          "name": "cfg",
-          "type": "FLOAT",
-          "link": null,
-          "widget": {
-            "name": "cfg"
-          }
-        },
         {
           "name": "sampler_name",
           "type": "COMBO",
@@ -402,6 +641,42 @@
           "widget": {
             "name": "sampler_name"
           }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "SAMPLER",
+          "type": "SAMPLER",
+          "links": []
+        }
+      ],
+      "title": "KSamplerSelect",
+      "properties": {
+        "Node name for S&R": "KSamplerSelect"
+      },
+      "widgets_values": [
+        "euler"
+      ]
+    },
+    {
+      "id": 45,
+      "type": "BasicScheduler",
+      "pos": [
+        250,
+        300
+      ],
+      "size": [
+        200,
+        60
+      ],
+      "flags": {},
+      "order": 45,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": null
         },
         {
           "name": "scheduler",
@@ -412,19 +687,12 @@
           }
         },
         {
-          "name": "positive",
-          "type": "CONDITIONING",
-          "link": null
-        },
-        {
-          "name": "negative",
-          "type": "CONDITIONING",
-          "link": null
-        },
-        {
-          "name": "latent_image",
-          "type": "LATENT",
-          "link": null
+          "name": "steps",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "steps"
+          }
         },
         {
           "name": "denoise",
@@ -437,37 +705,93 @@
       ],
       "outputs": [
         {
-          "name": "LATENT",
-          "type": "LATENT",
+          "name": "SIGMAS",
+          "type": "SIGMAS",
           "links": []
         }
       ],
-      "title": "KSampler（自定义采样器）",
+      "title": "BasicScheduler",
       "properties": {
-        "Node name for S&R": "KSampler"
+        "Node name for S&R": "BasicScheduler"
       },
       "widgets_values": [
-        0,
-        30,
-        1.0,
-        "euler",
         "simple",
+        30,
         1.0
       ]
     },
     {
-      "id": 8,
-      "type": "VAEDecode",
+      "id": 42,
+      "type": "SamplerCustomAdvanced",
       "pos": [
-        500,
-        120
+        690,
+        200
       ],
       "size": [
-        220,
-        40
+        280,
+        160
       ],
       "flags": {},
-      "order": 7,
+      "order": 42,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "noise",
+          "type": "NOISE",
+          "link": null
+        },
+        {
+          "name": "guider",
+          "type": "GUIDER",
+          "link": null
+        },
+        {
+          "name": "sampler",
+          "type": "SAMPLER",
+          "link": null
+        },
+        {
+          "name": "sigmas",
+          "type": "SIGMAS",
+          "link": null
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output",
+          "type": "LATENT",
+          "links": []
+        },
+        {
+          "name": "denoised_output",
+          "type": "LATENT",
+          "links": []
+        }
+      ],
+      "title": "SamplerCustomAdvanced",
+      "properties": {
+        "Node name for S&R": "SamplerCustomAdvanced"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 6,
+      "type": "ZouyuVAEDecodeAV",
+      "pos": [
+        980,
+        180
+      ],
+      "size": [
+        260,
+        120
+      ],
+      "flags": {},
+      "order": 6,
       "mode": 0,
       "inputs": [
         {
@@ -476,37 +800,96 @@
           "link": null
         },
         {
-          "name": "vae",
+          "name": "vae_image",
           "type": "VAE",
+          "link": null
+        },
+        {
+          "name": "vae_audio",
+          "type": "VAE",
+          "link": null
+        },
+        {
+          "name": "language",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "language"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": []
+        }
+      ],
+      "title": "音视频联合解码",
+      "properties": {
+        "Node name for S&R": "ZouyuVAEDecodeAV"
+      },
+      "widgets_values": [
+        "中文"
+      ]
+    },
+    {
+      "id": 48,
+      "type": "CreateVideo",
+      "pos": [
+        1290,
+        210
+      ],
+      "size": [
+        240,
+        60
+      ],
+      "flags": {},
+      "order": 48,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
           "link": null
         }
       ],
       "outputs": [
         {
-          "name": "IMAGE",
-          "type": "IMAGE",
+          "name": "VIDEO",
+          "type": "VIDEO",
           "links": []
         }
       ],
-      "title": "VAEDecode",
+      "title": "CreateVideo",
       "properties": {
-        "Node name for S&R": "VAEDecode"
+        "Node name for S&R": "CreateVideo"
       },
       "widgets_values": []
     },
     {
-      "id": 9,
+      "id": 49,
       "type": "SaveVideo",
       "pos": [
-        500,
-        220
+        1850,
+        130
       ],
       "size": [
-        300,
-        100
+        240,
+        80
       ],
       "flags": {},
-      "order": 8,
+      "order": 49,
       "mode": 0,
       "inputs": [
         {
@@ -523,12 +906,56 @@
       "widgets_values": [
         "output"
       ]
+    },
+    {
+      "id": 10,
+      "type": "ZouyuClearTemp",
+      "pos": [
+        1530,
+        430
+      ],
+      "size": [
+        220,
+        40
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "trigger",
+          "type": "*",
+          "link": null
+        },
+        {
+          "name": "language",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "language"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "cleared_info",
+          "type": "STRING",
+          "links": []
+        }
+      ],
+      "title": "清空临时存储",
+      "properties": {
+        "Node name for S&R": "ZouyuClearTemp"
+      },
+      "widgets_values": [
+        "中文"
+      ]
     }
   ],
   "links": [
     [
       1,
-      2,
+      20,
       0,
       5,
       0,
@@ -536,7 +963,7 @@
     ],
     [
       2,
-      3,
+      21,
       0,
       5,
       1,
@@ -544,7 +971,7 @@
     ],
     [
       3,
-      4,
+      22,
       0,
       5,
       2,
@@ -552,68 +979,172 @@
     ],
     [
       4,
+      19,
+      0,
       5,
-      0,
-      6,
-      0,
-      "CONDITIONING"
+      3,
+      "MODEL"
     ],
     [
       5,
+      53,
+      0,
       5,
-      0,
-      7,
-      6,
-      "CONDITIONING"
+      5,
+      "INT"
     ],
     [
       6,
-      6,
-      0,
-      7,
-      7,
-      "CONDITIONING"
-    ],
-    [
-      7,
+      53,
       1,
-      0,
+      5,
+      6,
+      "INT"
+    ],
+    [
       7,
+      55,
+      0,
+      5,
+      7,
+      "FLOAT"
+    ],
+    [
+      8,
+      16,
+      0,
+      5,
+      14,
+      "IMAGE"
+    ],
+    [
+      9,
+      17,
+      0,
+      5,
+      15,
+      "IMAGE"
+    ],
+    [
+      10,
+      18,
+      0,
+      5,
+      16,
+      "VIDEO"
+    ],
+    [
+      11,
+      5,
+      0,
+      42,
+      4,
+      "CONDITIONING"
+    ],
+    [
+      12,
+      5,
+      1,
+      42,
+      4,
+      "LATENT"
+    ],
+    [
+      13,
+      43,
+      0,
+      42,
+      0,
+      "NOISE"
+    ],
+    [
+      14,
+      44,
+      0,
+      42,
+      2,
+      "SAMPLER"
+    ],
+    [
+      15,
+      45,
+      0,
+      42,
+      3,
+      "SIGMAS"
+    ],
+    [
+      16,
+      19,
+      0,
+      45,
       0,
       "MODEL"
     ],
     [
-      8,
-      5,
-      1,
-      7,
-      8,
-      "LATENT"
-    ],
-    [
-      9,
-      7,
+      17,
+      42,
       0,
-      8,
+      6,
       0,
       "LATENT"
     ],
     [
-      10,
-      3,
+      18,
+      21,
       0,
-      8,
+      6,
       1,
       "VAE"
+    ],
+    [
+      19,
+      22,
+      0,
+      6,
+      2,
+      "VAE"
+    ],
+    [
+      20,
+      6,
+      0,
+      48,
+      0,
+      "IMAGE"
+    ],
+    [
+      21,
+      6,
+      1,
+      48,
+      1,
+      "AUDIO"
+    ],
+    [
+      22,
+      48,
+      0,
+      49,
+      0,
+      "VIDEO"
+    ],
+    [
+      23,
+      48,
+      0,
+      10,
+      0,
+      "VIDEO"
     ]
   ],
   "groups": [
     {
       "id": 1,
-      "title": "模型加载 (MiniMax H3)",
+      "title": "模型加载",
       "bounding": [
-        -840,
-        20,
+        -1160,
+        -20,
         420,
         560
       ],
@@ -622,33 +1153,45 @@
     },
     {
       "id": 2,
-      "title": "融合加载器 (ZouyuSeedTensor)",
+      "title": "融合加载器",
       "bounding": [
-        -380,
-        100,
-        480,
-        460
+        -260,
+        140,
+        500,
+        400
       ],
       "color": "#8A8",
       "flags": {}
     },
     {
       "id": 3,
-      "title": "采样与输出",
+      "title": "采样",
       "bounding": [
-        80,
-        100,
-        760,
-        360
+        240,
+        0,
+        420,
+        400
       ],
       "color": "#b58",
+      "flags": {}
+    },
+    {
+      "id": 4,
+      "title": "解码与输出",
+      "bounding": [
+        950,
+        150,
+        500,
+        320
+      ],
+      "color": "#8A8",
       "flags": {}
     }
   ],
   "config": {},
   "extra": {
     "frontendVersion": "1.23.0",
-    "note": "ZouyuSeedTensor 融合加载器示例：在 prompt 中使用 @文件名 引用永久目录种子，自动复制到临时目录并重新编码。输出 conditioning + latent 交给自定义采样器。"
+    "note": "新版融合加载器示例：model/clip/vae/audio_vae 接入；duration(秒)+fps 控制时长；LoadVideo 直接连参考视频；ZouyuVAEDecodeAV 联合解码图像+音频；backup 备份开关。"
   },
   "version": 0.4
 }

@@ -72,6 +72,11 @@ _CHOICE_MAPS = {
         "永久存储": "permanent", "permanent": "permanent", "Permanent": "permanent",
         "临时存储": "temp", "temp": "temp", "Temporary": "temp",
     },
+    "backup": {
+        "永久备份": "permanent", "permanent": "permanent", "Permanent": "permanent",
+        "临时备份": "temp", "temp": "temp", "Temporary": "temp",
+        "不备份": "none", "none": "none", "None": "none",
+    },
 }
 
 
