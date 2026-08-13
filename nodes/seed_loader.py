@@ -42,8 +42,8 @@ from ..core import (
     unload_all_models_thorough,          # 新增导入
 )
 
-# 导入新编码器
-from .reference_encoder import encode_references_to_cond
+# 导入新编码器（reference_encoder.py 位于插件根目录）
+from ..reference_encoder import encode_references_to_cond
 
 
 # MiniMax H3 训练帧数范围（官方注释 ~124-362 帧）

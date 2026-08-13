@@ -143,6 +143,14 @@ def encode_references_to_cond(clip, vae, audio_vae, prompt, width, height, lengt
         ref_items.append({"type": "audio"})
         ref_blocks.append({"kind": "audio", "ref_audio_t": ref_audio_t, "audio_latent": audio_latent})
 
+    # ------------------------------------------------------------------
+    # 关键内存优化：卸载 VAE（视频 ~5GB + 音频 ~0.6GB），为文本编码腾出显存。
+    # 否则视频 VAE + 音频 VAE + Qwen3-VL 文本编码器(~15GB) 三者同时驻留，
+    # 8GB 显存必然 OOM。参考 latent 已保存在 ref_blocks 中，卸载 VAE 不影响结果。
+    # ------------------------------------------------------------------
+    comfy.model_management.unload_all_models()
+    comfy.model_management.soft_empty_cache(force=True)
+
     tokens = clip.tokenize(prompt, minimax_ref_items=ref_items)
     cond = clip.encode_from_tokens_scheduled(tokens)
     if ref_blocks:

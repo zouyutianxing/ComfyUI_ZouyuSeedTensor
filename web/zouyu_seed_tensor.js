@@ -58,6 +58,7 @@ const LABELS = {
   duration: { zh: "时长(秒)", en: "Duration (s)" },
   fps: { zh: "帧率", en: "FPS" },
   ref_image_size: { zh: "参考图缩放", en: "Ref Image Size" },
+  ref_scale: { zh: "参考值放大", en: "Ref Scale" },
   crop_mode: { zh: "裁剪方式", en: "Crop Mode" },
   prompt_text: { zh: "提示词", en: "Prompt" },
   ref_image_format: { zh: "参考图格式", en: "Ref Format" },
