@@ -8,12 +8,14 @@
 3. 将新提供的参考提示词 / 图片 / 视频 / 音频 打包成张量文件（自动存入临时目录）
 4. 用内置 MiniMax H3 Reference to Video 根据新提示词重新解码编码
 5. 将重新编码结果打包成一个张量文件，清空临时目录其他文件，卸载显存/内存
-6. 输出「引导器(conditioning)」+「Latent」给自定义采样器
+6. 输出「张量输出(conditioning)」+「引导器(GUIDER)」+「Latent」+「日志(logs)」给自定义采样器
 
 - 时长(duration) + 帧率(fps) 控制，替代固定帧数
 - 视频端口直接接收 VIDEO（内部提取帧 + 音轨）
 - 打包前可备份到永久/临时目录
 - 输出前卸载 clip/vae/audio_vae 显存
+- 新增「日志」输出端口：运行全过程日志以中文描述输出
+- 提示词中支持 @参考图N / @参考视频N / @参考音频N 引用已连接的参考端口
 """
 
 import os
@@ -41,19 +43,26 @@ class ZouyuSeedLoader:
     """融合加载器：@复制 + 媒体提取 + Reference to Video 重新编码 + 打包 + 备份 + 清空 + 卸载。"""
 
     _AT_PATTERN = re.compile(r'@([\w\-.\u4e00-\u9fff]+)')
+    # 参考端口 @ 提及（@参考图N / @参考视频N / @参考音频N），参考媒体由端口连接自动收集
+    _REF_PORT_MENTION = re.compile(r'@\s*参考(?:图|视频|音频)\s*\d*')
 
     @classmethod
     def INPUT_TYPES(cls):
-        optional = {}
-        # 参考图动态端口（最多 50 个）
-        for i in range(MAX_REFERENCE_IMAGES):
-            optional[f"reference_image_{i}"] = ("IMAGE", {"tooltip": f"新参考图 {i + 1}"})
-        # 参考视频（直接接收 VIDEO，内部提取帧 + 音轨）
-        for i in range(MAX_REFERENCE_VIDEOS):
-            optional[f"ref_video_{i}"] = ("VIDEO", {"tooltip": f"新参考视频 {i + 1}（直接连 LoadVideo，内部提取帧与音轨）"})
-        # 参考音频（直接上传音频，内部用 audio_vae 编码）
-        for i in range(MAX_REFERENCE_AUDIOS):
-            optional[f"ref_audio_{i}"] = ("AUDIO", {"tooltip": f"新参考音频 {i + 1}（直接上传音频）"})
+        # 参考端口统一 0 起点，由前端动态扩展（仅 0 号端口提供说明）
+        optional = {
+            **{f"reference_image_{i}": ("IMAGE", {}) for i in range(MAX_REFERENCE_IMAGES)},
+            **{f"ref_video_{i}": ("VIDEO", {}) for i in range(MAX_REFERENCE_VIDEOS)},
+            **{f"ref_audio_{i}": ("AUDIO", {}) for i in range(MAX_REFERENCE_AUDIOS)},
+        }
+        optional["reference_image_0"] = ("IMAGE", {
+            "tooltip": "参考图 1（连接后自动出现参考图 2，最多 50 张，同类端口连续排列）"
+        })
+        optional["ref_video_0"] = ("VIDEO", {
+            "tooltip": "参考视频 1（直连 LoadVideo，内部提取帧与音轨，最多 3 个）"
+        })
+        optional["ref_audio_0"] = ("AUDIO", {
+            "tooltip": "参考音频 1（直接上传，内部用音频 VAE 编码，最多 3 个）"
+        })
 
         return {
             "required": {
@@ -63,7 +72,7 @@ class ZouyuSeedLoader:
                 "audio_vae": ("VAE", {"tooltip": "MiniMax H3 音频 VAE（有参考时必需）"}),
                 "prompt": ("STRING", {
                     "default": "", "multiline": True,
-                    "tooltip": "提示词。使用 @文件名 引用永久目录中的种子张量（自动复制到临时目录并重新编码）"
+                    "tooltip": "提示词。@文件名 引用永久目录种子张量（自动复制到临时目录重新编码）；@参考图N/@参考视频N/@参考音频N 引用已连接参考端口"
                 }),
                 "width": ("INT", {"default": 1344, "min": 32, "max": 8192, "step": 32}),
                 "height": ("INT", {"default": 768, "min": 32, "max": 8192, "step": 32}),
@@ -83,10 +92,17 @@ class ZouyuSeedLoader:
             "optional": optional,
         }
 
-    RETURN_TYPES = ("CONDITIONING", "GUIDER", "LATENT")
-    RETURN_NAMES = ("conditioning", "guider", "latent")
+    RETURN_TYPES = ("CONDITIONING", "GUIDER", "LATENT", "STRING")
+    RETURN_NAMES = ("conditioning", "guider", "latent", "logs")
     FUNCTION = "execute"
     CATEGORY = "ZouyuAI/SeedTensor"
+
+    # ------------------------------------------------------------------
+    # 日志（中文描述，累积到 self._log_lines，同时打印到控制台）
+    # ------------------------------------------------------------------
+    def _logz(self, msg):
+        self._log_lines.append(msg)
+        log(msg)
 
     @staticmethod
     def _unpack(out):
@@ -97,8 +113,7 @@ class ZouyuSeedLoader:
             return args[0], args[1]
         raise RuntimeError(f"MiniMax H3 conditioning 返回异常: {type(out)!r}")
 
-    @staticmethod
-    def _video_to_frames(v):
+    def _video_to_frames(self, v):
         """把 VIDEO 对象（或 IMAGE 帧序列）转为 (frames, audio)。"""
         if v is None:
             return None, None
@@ -110,7 +125,7 @@ class ZouyuSeedLoader:
                 audio = getattr(comps, "audio", None)
                 return frames, audio
             except Exception as exc:  # noqa: BLE001
-                log(f"提取视频帧失败: {exc}")
+                self._logz(f"提取视频帧失败: {exc}")
                 return None, None
         # IMAGE 帧序列
         if torch.is_tensor(v):
@@ -118,13 +133,17 @@ class ZouyuSeedLoader:
         return None, None
 
     def _collect_new_refs(self, kwargs):
+        """收集新连接的参考端口（缺失/未连接的端口自动跳过）。"""
         images, videos, video_audios, audios = [], [], [], []
         for i in range(MAX_REFERENCE_IMAGES):
             img = kwargs.get(f"reference_image_{i}")
-            if img is not None and getattr(img, "shape", None) and img.shape[0] > 0:
-                images.append(img)
+            if img is None or getattr(img, "shape", None) is None or img.shape[0] == 0:
+                continue  # 跳过缺失链接的参考端口
+            images.append(img)
         for i in range(MAX_REFERENCE_VIDEOS):
             v = kwargs.get(f"ref_video_{i}")
+            if v is None:
+                continue  # 跳过缺失链接的参考端口
             frames, audio = self._video_to_frames(v)
             if frames is not None and getattr(frames, "shape", None) and frames.shape[0] > 0:
                 videos.append(frames)
@@ -132,6 +151,8 @@ class ZouyuSeedLoader:
                     video_audios.append(audio)
         for i in range(MAX_REFERENCE_AUDIOS):
             a = kwargs.get(f"ref_audio_{i}")
+            if a is None:
+                continue  # 跳过缺失链接的参考端口
             if isinstance(a, dict) and a.get("waveform") is not None:
                 audios.append(a)
         return images, videos, video_audios, audios
@@ -144,7 +165,7 @@ class ZouyuSeedLoader:
             try:
                 data = torch.load(path, map_location="cpu", weights_only=False)
             except Exception as exc:  # noqa: BLE001
-                log(f"跳过无法读取的临时文件 {fname}: {exc}")
+                self._logz(f"跳过无法读取的临时文件 {fname}: {exc}")
                 continue
             media = extract_media(data)
             if not isinstance(media, dict):
@@ -156,7 +177,7 @@ class ZouyuSeedLoader:
                     for i in range(imgs.shape[0]):
                         images.append(imgs[i:i + 1])
                 except Exception as exc:  # noqa: BLE001
-                    log(f"解码参考图失败 {fname}: {exc}")
+                    self._logz(f"解码参考图失败 {fname}: {exc}")
             for v in media.get("ref_videos", []):
                 if isinstance(v, torch.Tensor):
                     videos.append(v.float())
@@ -171,7 +192,7 @@ class ZouyuSeedLoader:
     def execute(self, clip, vae, audio_vae, model, prompt, width, height, duration, fps,
                 ref_image_size="match", seed=0, filename="fused_seed", backup="permanent",
                 language="中文", **kwargs):
-        zh = (language != "English")
+        self._log_lines = []
         ref_image_size = normalize_choice("ref_image_size", ref_image_size, "match")
         backup = normalize_choice("backup", backup, "permanent")
 
@@ -188,6 +209,14 @@ class ZouyuSeedLoader:
         # 帧数 = 时长 × 帧率
         frame_count = max(5, int(round(duration * fps)))
 
+        self._logz(f"开始融合：时长={duration}s @ {fps}fps，画布={width}x{height}，种子={seed}")
+
+        # ---- 0. 剥离参考端口 @ 提及（参考媒体由端口连接自动收集）----
+        ref_port_mentions = self._REF_PORT_MENTION.findall(prompt)
+        if ref_port_mentions:
+            self._logz(f"识别到参考端口 @ 提及: {[m.strip() for m in ref_port_mentions]}")
+            prompt = self._REF_PORT_MENTION.sub('', prompt)
+
         # ---- 1. 解析 @引用，复制永久 -> 临时 ----
         refs = self._AT_PATTERN.findall(prompt)
         copied = []
@@ -200,21 +229,19 @@ class ZouyuSeedLoader:
                 try:
                     src, loc = resolve_seed_path(r)
                 except FileNotFoundError:
-                    log(f"警告: @文件 {r} 不存在，跳过" if zh else f"Warning: @file {r} not found")
+                    self._logz(f"警告: @文件 {r} 不存在，跳过")
                     continue
                 if loc == "permanent":
                     dst = copy_to_temp(src)
                     if dst:
                         copied.append(r)
-            if copied and zh:
-                log(f"已复制 {len(copied)} 个永久种子到临时目录: {copied}")
-            elif copied:
-                log(f"Copied {len(copied)} permanent seeds to temp: {copied}")
+            if copied:
+                self._logz(f"已复制 {len(copied)} 个永久种子到临时目录: {copied}")
 
         # ---- 2. 从临时目录提取参考媒体 ----
         temp_images, temp_videos, temp_video_audios, temp_audios = self._collect_from_temp()
 
-        # ---- 3. 加上新参考 ----
+        # ---- 3. 加上新参考（缺失端口自动跳过）----
         new_images, new_videos, new_video_audios, new_audios = self._collect_new_refs(kwargs)
 
         all_images = temp_images + new_images
@@ -223,6 +250,8 @@ class ZouyuSeedLoader:
         all_audios = temp_audios + new_audios
 
         has_ref = bool(all_images or all_videos or all_video_audios or all_audios)
+
+        self._logz(f"参考媒体：图片={len(all_images)}，视频={len(all_videos)}，音频={len(all_audios)}")
 
         # ---- 4. 清理提示词 ----
         cleaned_prompt = self._AT_PATTERN.sub('', prompt).strip()
@@ -237,6 +266,8 @@ class ZouyuSeedLoader:
         # ---- 6. 用内置 Reference to Video 重新解码编码 ----
         pbar = make_progress(2, label="重新编码")
         progress_update(pbar, 1)
+
+        self._logz("调用 MiniMax H3 Reference to Video 重新解码编码…")
 
         from comfy_extras.nodes_minimax_h3 import MiniMaxH3ReferenceToVideo, MiniMaxH3ImageToVideo
 
@@ -327,7 +358,9 @@ class ZouyuSeedLoader:
         }
         torch.save(wrapper, temp_path)
 
-        # ---- 8. 备份（需求 11）----
+        self._logz(f"已打包张量文件 -> {temp_path} ({os.path.getsize(temp_path) / (1024 * 1024):.1f} MB)")
+
+        # ---- 8. 备份 ----
         if backup == "permanent":
             perm_path = os.path.join(get_seeds_dir(), f"{safe_name}.pt")
             try:
@@ -351,24 +384,17 @@ class ZouyuSeedLoader:
                 }
                 write_sidecar_meta(f"{safe_name}.pt", entry)
                 update_catalog_entry(safe_name, entry)
-                log(f"已备份到永久目录: {perm_path}" if zh else f"Backed up to permanent: {perm_path}")
+                self._logz(f"已备份到永久目录: {perm_path}")
             except Exception as exc:  # noqa: BLE001
-                log(f"备份失败: {exc}" if zh else f"Backup failed: {exc}")
+                self._logz(f"备份失败: {exc}")
 
         # ---- 9. 清空临时目录其他文件（仅保留新打包的张量）----
         removed = clear_temp_except(f"{safe_name}.pt")
+        self._logz(f"已清空临时目录其他文件（移除 {removed} 项）")
 
-        # ---- 10. 卸载显存与内存（需求 8）----
+        # ---- 10. 卸载显存与内存 ----
         free_memory()
-
-        mb = os.path.getsize(temp_path) / (1024 * 1024)
-
-        if zh:
-            log(f"融合完成 -> {temp_path} ({mb:.1f} MB, 时长={duration}s@{fps}fps, 参考图={len(ref_image_bytes)}, "
-                f"视频={len(all_videos)}, 音频={len(all_audios)}, 清空临时 {removed} 项, 备份={backup})")
-        else:
-            log(f"Fusion done -> {temp_path} ({mb:.1f} MB, dur={duration}s@{fps}fps, images={len(ref_image_bytes)}, "
-                f"videos={len(all_videos)}, audios={len(all_audios)}, cleared {removed}, backup={backup})")
+        self._logz("已卸载显存与内存占用")
 
         # ---- 11. 构建引导器（GUIDER，供自定义采样器 SamplerCustomAdvanced 使用）----
         guider = None
@@ -383,7 +409,11 @@ class ZouyuSeedLoader:
                 g = _Guider_Basic(model)
                 g.set_conds(cond)
                 guider = g
+                self._logz("已构建引导器 GUIDER")
             except Exception as exc:  # noqa: BLE001
-                log(f"构建引导器失败: {exc}" if zh else f"Build guider failed: {exc}")
+                self._logz(f"构建引导器失败: {exc}")
 
-        return (cond, guider, latent)
+        self._logz("融合完成")
+
+        logs_text = "\n".join(self._log_lines)
+        return {"ui": {"text": [logs_text]}, "result": (cond, guider, latent, logs_text)}

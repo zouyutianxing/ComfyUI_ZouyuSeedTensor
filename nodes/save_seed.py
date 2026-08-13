@@ -38,14 +38,15 @@ class ZouyuSaveSeedConditioning:
             "duration": ("FLOAT", {"default": 0.0, "min": 0.0}),
             "ref_image_format": (["jpeg", "png"], {"default": "jpeg"}),
         }
-        # 参考图动态端口（最多 50 个）
-        for i in range(MAX_REFERENCE_IMAGES):
-            optional[f"reference_image_{i}"] = ("IMAGE", {"tooltip": f"参考图 {i + 1}"})
-        for i in range(MAX_REFERENCE_VIDEOS):
-            optional[f"ref_video_{i}"] = ("IMAGE", {"tooltip": f"参考视频 {i + 1}（帧序列，24fps）"})
-            optional[f"ref_video_audio_{i}"] = ("AUDIO", {"tooltip": f"参考视频 {i + 1} 的配乐"})
-        for i in range(MAX_REFERENCE_AUDIOS):
-            optional[f"ref_audio_{i}"] = ("AUDIO", {"tooltip": f"独立参考音频 {i + 1}"})
+        # 参考端口统一 0 起点，由前端动态扩展；仅 0 号端口提供说明
+        optional.update({f"reference_image_{i}": ("IMAGE", {}) for i in range(MAX_REFERENCE_IMAGES)})
+        optional.update({f"ref_video_{i}": ("IMAGE", {}) for i in range(MAX_REFERENCE_VIDEOS)})
+        optional.update({f"ref_video_audio_{i}": ("AUDIO", {}) for i in range(MAX_REFERENCE_VIDEOS)})
+        optional.update({f"ref_audio_{i}": ("AUDIO", {}) for i in range(MAX_REFERENCE_AUDIOS)})
+        optional["reference_image_0"] = ("IMAGE", {"tooltip": "参考图 1（连接后自动出现参考图 2，最多 50 张）"})
+        optional["ref_video_0"] = ("IMAGE", {"tooltip": "参考视频 1（帧序列，24fps，最多 3 个）"})
+        optional["ref_video_audio_0"] = ("AUDIO", {"tooltip": "参考视频 1 的配乐（最多 3 个）"})
+        optional["ref_audio_0"] = ("AUDIO", {"tooltip": "独立参考音频 1（最多 3 个）"})
 
         return {
             "required": {
