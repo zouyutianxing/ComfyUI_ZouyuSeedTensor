@@ -57,10 +57,10 @@ class ZouyuSeedLoader:
 
         return {
             "required": {
+                "model": ("MODEL", {"tooltip": "MiniMax H3 模型（用于构建引导器 GUIDER）"}),
                 "clip": ("CLIP", {"tooltip": "MiniMax H3 文本编码器（Qwen3-VL）"}),
                 "vae": ("VAE", {"tooltip": "MiniMax H3 视频 VAE"}),
                 "audio_vae": ("VAE", {"tooltip": "MiniMax H3 音频 VAE（有参考时必需）"}),
-                "model": ("MODEL", {"tooltip": "MiniMax H3 模型（可选，用于溯源记录）"}),
                 "prompt": ("STRING", {
                     "default": "", "multiline": True,
                     "tooltip": "提示词。使用 @文件名 引用永久目录中的种子张量（自动复制到临时目录并重新编码）"
@@ -83,8 +83,8 @@ class ZouyuSeedLoader:
             "optional": optional,
         }
 
-    RETURN_TYPES = ("CONDITIONING", "LATENT")
-    RETURN_NAMES = ("conditioning", "latent")
+    RETURN_TYPES = ("CONDITIONING", "GUIDER", "LATENT")
+    RETURN_NAMES = ("conditioning", "guider", "latent")
     FUNCTION = "execute"
     CATEGORY = "ZouyuAI/SeedTensor"
 
@@ -370,4 +370,20 @@ class ZouyuSeedLoader:
             log(f"Fusion done -> {temp_path} ({mb:.1f} MB, dur={duration}s@{fps}fps, images={len(ref_image_bytes)}, "
                 f"videos={len(all_videos)}, audios={len(all_audios)}, cleared {removed}, backup={backup})")
 
-        return (cond, latent)
+        # ---- 11. 构建引导器（GUIDER，供自定义采样器 SamplerCustomAdvanced 使用）----
+        guider = None
+        if model is not None:
+            try:
+                import comfy.samplers as samplers
+
+                class _Guider_Basic(samplers.CFGGuider):
+                    def set_conds(self, positive):
+                        self.inner_set_conds({"positive": positive})
+
+                g = _Guider_Basic(model)
+                g.set_conds(cond)
+                guider = g
+            except Exception as exc:  # noqa: BLE001
+                log(f"构建引导器失败: {exc}" if zh else f"Build guider failed: {exc}")
+
+        return (cond, guider, latent)

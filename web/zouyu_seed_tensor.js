@@ -48,12 +48,13 @@ function isZh(lang) {
 
 // widget / 端口 label（key 为内部名，值始终英文键）
 const LABELS = {
-  conditioning: { zh: "引导器", en: "Conditioning" },
+  conditioning: { zh: "条件", en: "Conditioning" },
+  guider: { zh: "引导器", en: "Guider" },
   latent: { zh: "Latent 图像", en: "Latent" },
   clip: { zh: "文本编码器", en: "CLIP" },
   vae: { zh: "视频 VAE", en: "VAE" },
   audio_vae: { zh: "音频 VAE", en: "Audio VAE" },
-  model: { zh: "MiniMax H3 模型", en: "Model" },
+  model: { zh: "模型", en: "Model" },
   seed: { zh: "种子", en: "Seed" },
   filename: { zh: "文件名", en: "Filename" },
   storage: { zh: "存储位置", en: "Storage" },
