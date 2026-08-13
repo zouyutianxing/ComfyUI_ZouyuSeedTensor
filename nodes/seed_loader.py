@@ -21,6 +21,7 @@
 
 import os
 import re
+import gc
 import math
 
 import torch
@@ -33,7 +34,7 @@ from ..core import (
     MAX_REFERENCE_IMAGES, MAX_REFERENCE_VIDEOS, MAX_REFERENCE_AUDIOS,
     safe_filename, now_iso,
     get_seeds_dir, get_temp_dir, scan_temp_files, resolve_seed_path, copy_to_temp,
-    clear_temp_except, free_memory,
+    clear_temp_except,
     convert_to_serializable, convert_from_serializable, move_to_device, extract_media,
     bytes_to_image, image_to_bytes, collect_gpu_info, temporal_shape,
     normalize_choice, update_catalog_entry, write_sidecar_meta,
@@ -44,6 +45,36 @@ from ..core import (
 # MiniMax H3 训练帧数范围（官方注释 ~124-362 帧）
 MAX_TRAINED_FRAMES = 362
 MAX_FRAMES = 3600  # 官方 length 上限
+
+
+def _unload_all_models_thorough(logz, label="卸载全部模型"):
+    """彻底卸载全部模型：显存 -> CPU 内存，并回收 torch 缓存与死对象。
+
+    - unload_all_models()：把所有已加载模型的权重从显存卸载到 CPU 内存
+    - cleanup_models()：清理已死的 LoadedModel 条目
+    - soft_empty_cache(force=True)：清空 torch 缓存分配器（释放缓存显存）
+    - gc.collect()：回收死对象（释放 CPU 内存）
+    - torch.cuda.empty_cache()/ipc_collect()：释放 CUDA 缓存
+    """
+    logz(f"{label}（显存 + 内存）…")
+    try:
+        model_management.unload_all_models()
+    except Exception:
+        pass
+    try:
+        model_management.cleanup_models()
+    except Exception:
+        pass
+    model_management.soft_empty_cache(force=True)
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        try:
+            torch.cuda.ipc_collect()
+        except Exception:
+            pass
+    gc.collect()
+    logz("模型已从显存与内存卸载，可重新从硬盘/缓存加载")
 
 
 class ZouyuSeedLoader(io.ComfyNode):
@@ -474,20 +505,14 @@ class ZouyuSeedLoader(io.ComfyNode):
         logz(f"已清空临时目录其他文件（移除 {removed} 项）")
 
         # =====================================================================
-        # 阶段 2：卸载全部模型，释放显存与内存
+        # 阶段 2：卸载全部模型（显存 + CPU 内存）
         # =====================================================================
-        logz("阶段2：卸载全部模型，释放显存…")
         del cond, latent
         if ref_items is not None:
             del ref_items, ref_blocks
-        free_memory()
-        try:
-            model_management.unload_all_models()
-        except Exception:
-            pass
-        model_management.soft_empty_cache(force=True)
-        free_memory()
-        logz("已卸载 clip / vae / audio_vae，显存已释放")
+        # 丢弃 clip / vae / audio_vae 的本地引用（帮助 gc 回收 CPU 内存）
+        del clip, vae, audio_vae
+        _unload_all_models_thorough(logz, label="阶段2：卸载全部模型")
 
         # =====================================================================
         # 阶段 3：加载视频模型 + 解包 → 采样器数据
