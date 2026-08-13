@@ -39,42 +39,16 @@ from ..core import (
     bytes_to_image, image_to_bytes, collect_gpu_info, temporal_shape,
     normalize_choice, update_catalog_entry, write_sidecar_meta,
     make_progress, progress_update, log,
+    unload_all_models_thorough,          # 新增导入
 )
+
+# 导入新编码器
+from .reference_encoder import encode_references_to_cond
 
 
 # MiniMax H3 训练帧数范围（官方注释 ~124-362 帧）
 MAX_TRAINED_FRAMES = 362
 MAX_FRAMES = 3600  # 官方 length 上限
-
-
-def _unload_all_models_thorough(logz, label="卸载全部模型"):
-    """彻底卸载全部模型：显存 -> CPU 内存，并回收 torch 缓存与死对象。
-
-    - unload_all_models()：把所有已加载模型的权重从显存卸载到 CPU 内存
-    - cleanup_models()：清理已死的 LoadedModel 条目
-    - soft_empty_cache(force=True)：清空 torch 缓存分配器（释放缓存显存）
-    - gc.collect()：回收死对象（释放 CPU 内存）
-    - torch.cuda.empty_cache()/ipc_collect()：释放 CUDA 缓存
-    """
-    logz(f"{label}（显存 + 内存）…")
-    try:
-        model_management.unload_all_models()
-    except Exception:
-        pass
-    try:
-        model_management.cleanup_models()
-    except Exception:
-        pass
-    model_management.soft_empty_cache(force=True)
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        try:
-            torch.cuda.ipc_collect()
-        except Exception:
-            pass
-    gc.collect()
-    logz("模型已从显存与内存卸载，可重新从硬盘/缓存加载")
 
 
 class ZouyuSeedLoader(io.ComfyNode):
@@ -104,6 +78,8 @@ class ZouyuSeedLoader(io.ComfyNode):
                 io.Float.Input("fps", default=24.0, min=1.0, max=120.0, step=1.0,
                                tooltip="最终输出视频帧率"),
                 io.Combo.Input("ref_image_size", options=["match", "max"], default="match"),
+                io.Float.Input("ref_scale", display_name="参考值放大", default=1.0, min=1.0, max=5.0, step=0.1,
+                               tooltip="仅 match 模式生效。参考图面积倍率（1.0=官方行为，越大保真度越高越慢）"),
                 io.Int.Input("seed", default=0, min=0, max=0xFFFFFFFFFFFFFFFF),
                 io.String.Input("filename", default="fused_seed", tooltip="重新编码后打包的输出文件名"),
                 io.Combo.Input("backup", options=["permanent", "temp", "none"], default="permanent",
@@ -158,119 +134,22 @@ class ZouyuSeedLoader(io.ComfyNode):
             return v, None
         return None, None
 
-    @staticmethod
-    def _encode_references(vae, audio_vae, ref_images, ref_videos, ref_video_audios, ref_audios,
-                           width, height, frame_count, ref_image_size):
-        """镜像官方 MiniMaxH3ReferenceToVideo 的参考编码，返回 (ref_items, ref_blocks)。"""
-        from comfy_extras.nodes_minimax_h3 import (
-            _resize, adapt_canvas, REF_IMAGE_SHORT_EDGE, CANVAS_MULTIPLE,
-            MiniMaxH3ReferenceToVideo,
-        )
-
-        ref_items = []
-        ref_blocks = []
-
-        for img in (ref_images or {}).values():
-            if img is None:
-                continue
-            h, w = img.shape[1], img.shape[2]
-            if ref_image_size == "match":
-                scale = min(1.0, math.sqrt((width * height) / (w * h)))
-            else:
-                scale = min(1.0, REF_IMAGE_SHORT_EDGE / min(w, h))
-            tw = max(CANVAS_MULTIPLE, round(w * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
-            th = max(CANVAS_MULTIPLE, round(h * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
-            resized = _resize(img[:1], tw, th, "disabled")
-            z = vae.encode(resized)
-            ref_items.append({"type": "image", "data": resized})
-            ref_blocks.append({"kind": "image", "latent_h": th // 16, "latent_w": tw // 16, "latent": z})
-
-        for name, video_frames in (ref_videos or {}).items():
-            if video_frames is None:
-                continue
-            soundtrack = (ref_video_audios or {}).get("ref_video_audio_" + name.rsplit("_", 1)[-1])
-            vh, vw = video_frames.shape[1], video_frames.shape[2]
-            cw, ch = adapt_canvas(vw, vh)
-            if vw * vh < cw * ch:
-                cw = max(CANVAS_MULTIPLE, round(vw / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
-                ch = max(CANVAS_MULTIPLE, round(vh / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
-            frames = _resize(video_frames, cw, ch, "disabled")
-            if frames.shape[0] > frame_count:
-                frames = frames[:frame_count]
-            n = frames.shape[0]
-            if n < 5:
-                raise ValueError("MiniMax H3 参考视频至少需要 5 帧（约 0.2s @ 24fps）")
-            while n % 17 != 5:
-                n -= 1
-            frames = frames[:n]
-            z = vae.encode(frames)
-            audio_latent, ref_audio_t = (None, 0)
-            if soundtrack is not None:
-                audio_latent, ref_audio_t = MiniMaxH3ReferenceToVideo._encode_ref_audio(audio_vae, soundtrack)
-                ref_items.append({"type": "audio"})
-            sample_idx = list(range(0, frames.shape[0], FPS // 2))
-            qwen_frames = frames[sample_idx]
-            ref_items.append({"type": "video", "data": qwen_frames,
-                              "timestamps": [i / 2.0 for i in range(len(sample_idx))]})
-            ref_blocks.append({"kind": "video_audio" if ref_audio_t else "video",
-                               "latent_t": z.shape[2], "latent_h": ch // 16, "latent_w": cw // 16,
-                               "ref_audio_t": ref_audio_t, "latent": z, "audio_latent": audio_latent})
-
-        for audio in (ref_audios or {}).values():
-            if audio is None:
-                continue
-            audio_latent, ref_audio_t = MiniMaxH3ReferenceToVideo._encode_ref_audio(audio_vae, audio)
-            ref_items.append({"type": "audio"})
-            ref_blocks.append({"kind": "audio", "ref_audio_t": ref_audio_t, "audio_latent": audio_latent})
-
-        return ref_items, ref_blocks
-
-    @staticmethod
-    def _collect_from_temp(logz):
-        """从临时目录所有 .pt 提取参考媒体，返回 (images, videos, video_audios, audios)。"""
-        images, videos, video_audios, audios = [], [], [], []
-        for fname in scan_temp_files():
-            path = os.path.join(get_temp_dir(), fname)
-            try:
-                data = torch.load(path, map_location="cpu", weights_only=False)
-            except Exception as exc:  # noqa: BLE001
-                logz(f"跳过无法读取的临时文件 {fname}: {exc}")
-                continue
-            media = extract_media(data)
-            if not isinstance(media, dict):
-                continue
-            img_data = media.get("ref_images", {})
-            if isinstance(img_data, dict) and img_data.get("bytes"):
-                try:
-                    imgs = bytes_to_image(img_data["bytes"], fmt=img_data.get("format", "jpeg"))
-                    for i in range(imgs.shape[0]):
-                        images.append(imgs[i:i + 1])
-                except Exception as exc:  # noqa: BLE001
-                    logz(f"解码参考图失败 {fname}: {exc}")
-            for v in media.get("ref_videos", []):
-                if isinstance(v, torch.Tensor):
-                    videos.append(v.float())
-                    video_audios.append(None)
-            for va in media.get("ref_video_audios", []):
-                if isinstance(va, dict) and va.get("waveform") is not None:
-                    video_audios.append(va)
-            for a in media.get("ref_audios", []):
-                if isinstance(a, dict) and a.get("waveform") is not None:
-                    audios.append(a)
-        return images, videos, video_audios, audios
-
     # ------------------------------------------------------------------
     # 主流程（分阶段任务流）
     # ------------------------------------------------------------------
     @classmethod
     def execute(cls, clip, vae, audio_vae, model, prompt, width, height, duration, fps,
-                ref_image_size="match", seed=0, filename="fused_seed", backup="permanent",
-                language="中文", ref_images=None, ref_videos=None, ref_audios=None) -> io.NodeOutput:
+                ref_image_size="match", ref_scale=1.0, seed=0, filename="fused_seed",
+                backup="permanent", language="中文", ref_images=None, ref_videos=None,
+                ref_audios=None) -> io.NodeOutput:
         log_lines = []
 
         def logz(msg):
             log_lines.append(msg)
             log(msg)
+
+        # ---- 0. 彻底卸载所有外部模型（阶段1前） ----
+        unload_all_models_thorough("阶段1前：卸载所有模型（包括DiT）")
 
         ref_image_size = normalize_choice("ref_image_size", ref_image_size, "match")
         backup = normalize_choice("backup", backup, "permanent")
@@ -355,45 +234,40 @@ class ZouyuSeedLoader(io.ComfyNode):
         # =====================================================================
         # 阶段 1：编码烘焙（仅 clip + vae + audio_vae，不加载视频模型）
         # =====================================================================
-        from comfy_extras.nodes_minimax_h3 import _empty_av_latent, MiniMaxH3ImageToVideo
-        import node_helpers
-
         pbar = make_progress(3, label="编码烘焙")
         progress_update(pbar, 1)
 
+        # ---- 编码（使用移植的编码器） ----
         if has_ref:
-            if audio_vae is None:
-                raise ValueError("[ZouyuSeedTensor] 参考模式需要 audio_vae（音频 VAE）")
-
-            latent, frame_count = _empty_av_latent(width, height, frame_count)
-
-            logz("阶段1a：编码参考媒体（视频 VAE + 音频 VAE）…")
+            # 构造字典供编码器使用
             ref_images_dict = {f"ref_image_{i}": img for i, img in enumerate(all_images)}
             ref_videos_dict = {f"ref_video_{i}": v for i, v in enumerate(all_videos)}
             ref_video_audios_dict = {f"ref_video_audio_{i}": a for i, a in enumerate(all_video_audios)}
             ref_audios_dict = {f"ref_audio_{i}": a for i, a in enumerate(all_audios)}
-            ref_items, ref_blocks = cls._encode_references(
-                vae, audio_vae, ref_images_dict, ref_videos_dict, ref_video_audios_dict, ref_audios_dict,
-                width, height, frame_count, ref_image_size)
 
-            # 卸载 VAE，为文本编码腾出显存
-            logz("阶段1b：卸载 VAE，释放显存…")
-            try:
-                model_management.unload_all_models()
-            except Exception:
-                pass
-            model_management.soft_empty_cache(force=True)
-
-            logz("阶段1c：文本编码（Qwen3-VL）…")
-            tokens = clip.tokenize(cleaned_prompt, minimax_ref_items=ref_items)
-            cond = clip.encode_from_tokens_scheduled(tokens)
-            if ref_blocks:
-                cond = node_helpers.conditioning_set_values(cond, {"minimax_refs": ref_blocks})
+            logz("阶段1：编码参考媒体（使用移植编码器）…")
+            cond, latent = encode_references_to_cond(
+                clip=clip,
+                vae=vae,
+                audio_vae=audio_vae,
+                prompt=cleaned_prompt,
+                width=width,
+                height=height,
+                length=frame_count,
+                ref_image_size=ref_image_size,
+                ref_scale=ref_scale,
+                ref_images=ref_images_dict,
+                ref_videos=ref_videos_dict,
+                ref_video_audios=ref_video_audios_dict,
+                ref_audios=ref_audios_dict,
+            )
+            # 注意：latent 已在 GPU 上，但后续我们会将其序列化到 CPU。
         else:
+            # 无参考，使用官方 ImageToVideo（纯文本模式）
             logz("阶段1：无参考，走 Image to Video 路径…")
+            from comfy_extras.nodes_minimax_h3 import MiniMaxH3ImageToVideo
             out = MiniMaxH3ImageToVideo.execute(clip, vae, cleaned_prompt, width, height, frame_count)
             cond, latent = cls._unpack(out)
-            ref_items, ref_blocks = None, None
 
         progress_update(pbar, 1)
 
@@ -405,6 +279,7 @@ class ZouyuSeedLoader(io.ComfyNode):
         safe_name = safe_filename(filename)
         temp_path = os.path.join(get_temp_dir(), f"{safe_name}.pt")
 
+        # ---- 构建媒体元数据（用于 .pt 内的 media 字段） ----
         ref_image_bytes = []
         ref_image_shapes = []
         for img in all_images:
@@ -437,6 +312,7 @@ class ZouyuSeedLoader(io.ComfyNode):
             "latent_t": int(latent_t),
             "audio_t": int(audio_t),
             "ref_image_size": ref_image_size,
+            "ref_scale": ref_scale,
             "storage": "temp",
             "ref_image_count": len(ref_image_bytes),
             "ref_image_shapes": ref_image_shapes,
@@ -508,11 +384,9 @@ class ZouyuSeedLoader(io.ComfyNode):
         # 阶段 2：卸载全部模型（显存 + CPU 内存）
         # =====================================================================
         del cond, latent
-        if ref_items is not None:
-            del ref_items, ref_blocks
         # 丢弃 clip / vae / audio_vae 的本地引用（帮助 gc 回收 CPU 内存）
         del clip, vae, audio_vae
-        _unload_all_models_thorough(logz, label="阶段2：卸载全部模型")
+        unload_all_models_thorough("阶段2：卸载全部模型（VAE/CLIP）")
 
         # =====================================================================
         # 阶段 3：加载视频模型 + 解包 → 采样器数据
@@ -554,3 +428,40 @@ class ZouyuSeedLoader(io.ComfyNode):
 
         logs_text = "\n".join(log_lines)
         return io.NodeOutput(cond, guider, latent, logs_text, ui={"text": [logs_text]})
+
+    # ------------------------------------------------------------------
+    # 辅助：从临时目录提取媒体
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _collect_from_temp(logz):
+        """从临时目录所有 .pt 提取参考媒体，返回 (images, videos, video_audios, audios)。"""
+        images, videos, video_audios, audios = [], [], [], []
+        for fname in scan_temp_files():
+            path = os.path.join(get_temp_dir(), fname)
+            try:
+                data = torch.load(path, map_location="cpu", weights_only=False)
+            except Exception as exc:  # noqa: BLE001
+                logz(f"跳过无法读取的临时文件 {fname}: {exc}")
+                continue
+            media = extract_media(data)
+            if not isinstance(media, dict):
+                continue
+            img_data = media.get("ref_images", {})
+            if isinstance(img_data, dict) and img_data.get("bytes"):
+                try:
+                    imgs = bytes_to_image(img_data["bytes"], fmt=img_data.get("format", "jpeg"))
+                    for i in range(imgs.shape[0]):
+                        images.append(imgs[i:i + 1])
+                except Exception as exc:  # noqa: BLE001
+                    logz(f"解码参考图失败 {fname}: {exc}")
+            for v in media.get("ref_videos", []):
+                if isinstance(v, torch.Tensor):
+                    videos.append(v.float())
+                    video_audios.append(None)
+            for va in media.get("ref_video_audios", []):
+                if isinstance(va, dict) and va.get("waveform") is not None:
+                    video_audios.append(va)
+            for a in media.get("ref_audios", []):
+                if isinstance(a, dict) and a.get("waveform") is not None:
+                    audios.append(a)
+        return images, videos, video_audios, audios

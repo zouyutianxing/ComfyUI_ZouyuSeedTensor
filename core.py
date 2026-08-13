@@ -19,6 +19,7 @@ import math
 import shutil
 import hashlib
 import datetime
+import gc
 
 import torch
 import folder_paths
@@ -253,7 +254,6 @@ def copy_to_temp(src_path):
 def free_memory():
     """卸载显存与内存占用（中间变量释放后调用）。"""
     try:
-        import gc
         gc.collect()
         if torch.cuda.is_available():
             try:
@@ -705,3 +705,38 @@ def notify_files_refresh():
         PromptServer.instance.send_sync("Zouyu-seed-files-refresh", {})
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# 彻底卸载工具（显存 + CPU 内存）
+# 用于阶段切换时释放资源，避免显存溢出
+# ---------------------------------------------------------------------------
+
+def unload_all_models_thorough(label="卸载全部模型"):
+    """
+    彻底卸载 ComfyUI 管理的所有模型，并清理显存和内存碎片。
+    该函数会强制卸载所有通过 ComfyUI 标准流程加载的模型，
+    清理模型管理器的缓存，并回收 PyTorch 的显存缓存。
+
+    Args:
+        label: 日志标签，用于标识调用位置
+    """
+    print(f"[ZouyuSeedTensor] {label}（显存 + 内存）…")
+    try:
+        model_management.unload_all_models()
+    except Exception as e:
+        print(f"[ZouyuSeedTensor] unload_all_models 出错: {e}")
+    try:
+        model_management.cleanup_models()
+    except Exception as e:
+        print(f"[ZouyuSeedTensor] cleanup_models 出错: {e}")
+    model_management.soft_empty_cache(force=True)
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        try:
+            torch.cuda.ipc_collect()
+        except Exception:
+            pass
+    gc.collect()
+    print(f"[ZouyuSeedTensor] {label} 完成")
