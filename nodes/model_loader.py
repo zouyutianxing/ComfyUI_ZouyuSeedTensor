@@ -69,6 +69,21 @@ TYPE_CATEGORY = {
 }
 
 
+def _all_model_files():
+    """全部模型分类下的文件合并列表（供 schema 下拉选项；后端校验通过的前提）。
+    首项固定为占位符 "(未选择)"，保证未使用的槽位也能通过后端校验。"""
+    cats = ["diffusion_models", "text_encoders", "vae", "loras", "checkpoints",
+            "clip_vision", "style_models", "upscale_models", "controlnet", "gligen"]
+    files, seen = [], set()
+    for c in cats:
+        for f in folder_paths.get_filename_list(c):
+            if f not in seen:
+                seen.add(f)
+                files.append(f)
+    files.insert(0, "(未选择)")
+    return files
+
+
 def _file_options(category):
     files = folder_paths.get_filename_list(category) if category else []
     return files if files else ["(未选择)"]
@@ -173,16 +188,17 @@ class ZouyuModelLoader(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         inputs = []
+        _all_files = _all_model_files()
         for i in range(MAX_MODELS):
             inputs.extend([
                 io.Combo.Input("model_{}_type".format(i), options=MODEL_TYPE_OPTIONS, default="未使用",
                                optional=True, tooltip="模型类型（未使用=该槽位空置）"),
                 io.String.Input("model_{}_folder".format(i), default="", optional=True,
                                 tooltip="模型文件夹（相对 models 目录，可留空=按类型默认）"),
-                # 文件用 STRING：前端动态渲染为下拉；STRING 不受后端选项列表校验限制，
-                # 避免"文件不在静态选项列表"的校验错误
-                io.String.Input("model_{}_name".format(i), default="(未选择)", optional=True,
-                                tooltip="模型文件"),
+                # 文件下拉选项 = 全模型合并列表：前端按类型/文件夹过滤显示，
+                # 后端校验对任何真实文件都能通过（官方加载器同为导入期列表）
+                io.Combo.Input("model_{}_name".format(i), options=_all_files, default="(未选择)",
+                               optional=True, tooltip="模型文件"),
             ])
         inputs.extend([
             io.Boolean.Input("compact_mode", default=False, label_on="集成", label_off="展开",
