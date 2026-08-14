@@ -570,7 +570,8 @@ async function refreshStatusDOM(node) {
       const m = byKind[kind];
       const st = STATE_INFO[m?.state || "unknown"];
       if (info.dotOnly) {
-        // 行尾三色灯：info.el 即灯元素本身；info.tag 为类型标签（集成模式）
+        // 行尾/画布三色灯：info.el 为 Vue 模式的灯元素，info.color 供两种模式使用
+        info.color = st.color;
         if (info.el) info.el.style.background = st.color;
         if (info.tag && m?.type) {
           info.tag.textContent = zh ? m.type_zh : m.type_en;
@@ -1013,7 +1014,7 @@ async function pickAndImportFolder(node) {
   }
 }
 
-/** 节点级拖入文件夹（Vue 前端通过 node.onDragOver/onDragDrop 回调）。 */
+/** 节点级拖入文件夹（两种渲染模式通用：canvas 画布也走 app 级 drop 分发）。 */
 function setupLoaderDragDrop(node) {
   node.onDragOver = (e) => {
     try {
@@ -1040,7 +1041,168 @@ function setupLoaderDragDrop(node) {
   };
 }
 
-/** 按当前状态应用控件显隐 + 行布局 + 端口平移。 */
+function isVueMode() {
+  return typeof LiteGraph !== "undefined" && !!LiteGraph.vueNodesMode;
+}
+
+/** 把当前控件值同步回状态（工作流加载/配置后控件值才恢复，需要重新读取）。 */
+function syncStateFromWidgets(node) {
+  const st = node.__zouyuSlotState;
+  if (!st) return;
+  for (let i = 0; i < MAX_MODELS; i++) {
+    const w = slotWidgets(node, i);
+    st.slots[i].type = w.type?.value || "未使用";
+    st.slots[i].folder = w.folder?.value || "";
+    st.slots[i].name = w.name?.value || "(未选择)";
+  }
+  st.compact = !!node.widgets?.find((w) => w.name === "compact_mode")?.value;
+  st.lowVram = !!node.widgets?.find((w) => w.name === "low_vram_mode")?.value;
+  st.lang = node.widgets?.find((w) => w.name === "language")?.value || getLang();
+}
+
+/** 布局分派：Vue 节点模式用 DOM 叠加层；旧版 Canvas 模式（默认）用 output.pos + 画布绘制。 */
+function applyLoaderLayout(node) {
+  if (isVueMode()) {
+    requestAnimationFrame(() => {
+      layoutLoaderOverlay(node);
+      forceSlotResync(node);
+    });
+    setTimeout(() => {
+      layoutLoaderOverlay(node);
+      forceSlotResync(node);
+    }, 60);
+  } else {
+    layoutLegacyLoader(node);
+  }
+}
+
+// ===========================================================================
+// 旧版 Canvas 渲染模式（LiteGraph.vueNodesMode=false，ComfyUI 默认）：
+// - 端口：node.outputs[i].pos 硬编码到对应下拉行（画布原生尊重 pos）
+// - 灯/📁/类型标签：node.onDrawForeground 画布绘制（自动跟随节点位置与大小）
+// - 📁 点击：node.onMouseDown 命中检测
+// - 节点尺寸：行数变化时按 computeSize() 收缩/伸长
+// ===========================================================================
+
+/** 旧版布局：端口对齐各行 + 行数变化时自动伸缩节点。 */
+function layoutLegacyLoader(node) {
+  const st = node.__zouyuSlotState;
+  if (!st) return;
+  try { node.arrange(); } catch (e) { /* 忽略 */ }
+  const count = visibleSlotCount(st);
+  const H = LiteGraph.NODE_WIDGET_HEIGHT;
+  for (let i = 0; i < MAX_MODELS; i++) {
+    const out = node.outputs && node.outputs[i];
+    if (!out) continue;
+    const s = st.slots[i];
+    const used = i < count && !!s && s.type !== "未使用";
+    if (used) {
+      const nameW = slotWidgets(node, i).name;
+      const rowY = (nameW && nameW.y != null ? nameW.y : 0) + H / 2;
+      out.pos = [node.size[0] - 8, rowY]; // 端口与下拉平行、位于最右
+      if (!node.__zouyuStatus[`slot${i}`]) node.__zouyuStatus[`slot${i}`] = { color: "#9e9e9e" };
+    } else {
+      out.pos = [-500, -500]; // 未使用的端口移出画布（不再堆在顶部）
+    }
+  }
+  // 节点尺寸随可见行数自动收缩/伸长
+  if (count !== node.__zouyuLastCount) {
+    node.__zouyuLastCount = count;
+    try {
+      const h = node.computeSize()[1];
+      if (Math.abs(h - node.size[1]) > 2) node.setSize([node.size[0], h]);
+    } catch (e) { /* 忽略 */ }
+  }
+}
+
+/** 画布绘制：每行端口左侧画三色灯；常规模式画 📁，集成模式画类型标签。 */
+function drawLegacyOverlay(node, ctx) {
+  const st = node.__zouyuSlotState;
+  if (!st || !ctx) return;
+  const compact = !!st.compact;
+  const zh = st.lang !== "English";
+  const count = visibleSlotCount(st);
+  const H = LiteGraph.NODE_WIDGET_HEIGHT;
+  const W = node.size[0];
+  ctx.save();
+  ctx.textBaseline = "middle";
+  for (let i = 0; i < MAX_MODELS; i++) {
+    if (i >= count) break;
+    const s = st.slots[i];
+    if (!s || s.type === "未使用") continue;
+    const nameW = slotWidgets(node, i).name;
+    const y = (nameW && nameW.y != null ? nameW.y : 0) + H / 2;
+    const info = node.__zouyuStatus && node.__zouyuStatus[`slot${i}`];
+    const color = (info && info.color) || "#9e9e9e";
+    // 三色灯（下拉与端口之间）
+    ctx.beginPath();
+    ctx.arc(W - 23, y, 6, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = "rgba(0,0,0,.5)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    if (compact) {
+      // 集成模式：类型只显示在端口旁
+      const tkey = TYPE_KEYS[s.type];
+      const label = zh ? s.type : (TYPE_PORT_NAMES_EN[tkey] || s.type);
+      ctx.font = "10px sans-serif";
+      ctx.fillStyle = "#c9a05f";
+      ctx.textAlign = "right";
+      ctx.fillText(label, W - 35, y);
+    } else {
+      // 📁 选择文件夹按钮
+      ctx.font = "12px sans-serif";
+      ctx.fillStyle = "#d8d8d8";
+      ctx.textAlign = "right";
+      ctx.fillText("📁", W - 35, y);
+    }
+    ctx.textAlign = "left";
+  }
+  ctx.restore();
+}
+
+/** 旧版点击处理：命中 📁 按钮区域则打开文件夹选择并消费事件。 */
+function legacyMouseDown(node, pos) {
+  const st = node.__zouyuSlotState;
+  if (!st || !!st.compact) return false;
+  const count = visibleSlotCount(st);
+  const H = LiteGraph.NODE_WIDGET_HEIGHT;
+  const W = node.size[0];
+  for (let i = 0; i < MAX_MODELS; i++) {
+    if (i >= count) break;
+    const s = st.slots[i];
+    if (!s || s.type === "未使用") continue;
+    const nameW = slotWidgets(node, i).name;
+    const y = (nameW && nameW.y != null ? nameW.y : 0) + H / 2;
+    if (pos[0] >= W - 47 && pos[0] <= W - 25 && pos[1] >= y - 9 && pos[1] <= y + 9) {
+      pickSlotFolder(node, i);
+      return true;
+    }
+  }
+  return false;
+}
+
+/** 旧版布局初始化：固定控件起始行（与端口位置解耦）+ 画布绘制 + 点击 + 底部导入条按钮。 */
+function setupLegacyLoaderLayout(node) {
+  // 固定控件起始行：使 widget.y 不受输出端口 pos 影响（否则端口对齐会反作用于布局）
+  node.widgets_start_y = 30;
+  node.onDrawForeground = (ctx) => {
+    layoutLegacyLoader(node); // 每帧刷新端口 X（跟随节点宽度变化）
+    drawLegacyOverlay(node, ctx);
+  };
+  node.onMouseDown = (e, pos) => legacyMouseDown(node, pos);
+  // 底部"拖入文件夹导入"按钮（画布原生可点击，占用一行）
+  const bar = addButton(node, "📥 拖入文件夹导入模型", "📥 Drop folder to import", () => pickAndImportFolder(node));
+  bar.__zouyuImportBar = true;
+  applySlotVisibility(node);
+  setTimeout(() => {
+    layoutLegacyLoader(node);
+    app.graph?.setDirtyCanvas(true, true);
+  }, 60);
+}
+
+/** 按当前状态应用控件显隐 + 行布局 + 端口对齐（自动分派 Vue/旧版Canvas 两种布局）。 */
 function applySlotVisibility(node) {
   const st = node.__zouyuSlotState;
   if (!st) return;
@@ -1060,15 +1222,8 @@ function applySlotVisibility(node) {
     if (w.name && w.name.value !== s.name) w.name.value = s.name;
   }
   syncLoaderOutputs(node);
+  applyLoaderLayout(node);
   app.graph?.setDirtyCanvas(true, true);
-  requestAnimationFrame(() => {
-    layoutLoaderOverlay(node);
-    forceSlotResync(node);
-  });
-  setTimeout(() => {
-    layoutLoaderOverlay(node);
-    forceSlotResync(node);
-  }, 60);
 }
 
 /** 输出端口与模型一一对应：按类型编号命名（主模型0/主模型1/lora0/...），端口文字隐藏由行尾标签展示。 */
@@ -1266,22 +1421,45 @@ function setupModelLoaderNode(node) {
   }
   refreshStatusDOM(node);
 
-  // 拖入文件夹导入
+  // 拖入文件夹导入（两种渲染模式通用）
   setupLoaderDragDrop(node);
 
-  // 布局：等 Vue 渲染出节点 DOM 后挂载叠加层 + 平移端口点
-  const layoutPass = () => {
-    layoutLoaderOverlay(node);
-    forceSlotResync(node);
+  // 工作流加载：控件值在 configure 之后才恢复，配置完成后重新同步状态并布局
+  const origCfg = node.onAfterGraphConfigured;
+  node.onAfterGraphConfigured = function (...args) {
+    try {
+      syncStateFromWidgets(node);
+      applySlotVisibility(node);
+      applyLoaderLabels(node);
+    } catch (e) { /* ignore */ }
+    const r = origCfg ? origCfg.apply(this, args) : undefined;
+    return r;
   };
-  setTimeout(layoutPass, 0);
-  setTimeout(layoutPass, 120);
-  setTimeout(layoutPass, 400);
-  setTimeout(() => watchLoaderOverlay(node), 600);
-  // 延时重同步：防止框架在 onNodeCreated 后重建控件覆盖显隐/回调
+
+  // 布局初始化：Vue 节点模式（叠加层）或 旧版 Canvas 模式（output.pos + 画布绘制）
+  if (isVueMode()) {
+    const layoutPass = () => {
+      layoutLoaderOverlay(node);
+      forceSlotResync(node);
+    };
+    setTimeout(layoutPass, 0);
+    setTimeout(layoutPass, 120);
+    setTimeout(layoutPass, 400);
+    setTimeout(() => watchLoaderOverlay(node), 600);
+  } else {
+    setupLegacyLoaderLayout(node);
+  }
+  // 延时重同步：防止框架在 onNodeCreated 后重建控件覆盖显隐/回调；并兜底工作流值恢复
   setTimeout(() => {
-    try { applySlotVisibility(node); applyLoaderLabels(node); } catch (e) { /* ignore */ }
+    try {
+      syncStateFromWidgets(node);
+      applySlotVisibility(node);
+      applyLoaderLabels(node);
+    } catch (e) { /* ignore */ }
   }, 150);
+  setTimeout(() => {
+    try { syncStateFromWidgets(node); applySlotVisibility(node); } catch (e) { /* ignore */ }
+  }, 600);
 }
 
 
