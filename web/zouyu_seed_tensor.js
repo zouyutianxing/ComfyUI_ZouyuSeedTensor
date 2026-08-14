@@ -93,6 +93,7 @@ const LABELS = {
   audio_vae_folder: { zh: "音频VAE 文件夹", en: "Audio VAE Folder" },
   audio_vae_name: { zh: "音频VAE", en: "Audio VAE" },
   low_vram_mode: { zh: "低显存模式", en: "Low VRAM Mode" },
+  trigger: { zh: "触发(执行时机)", en: "Trigger (timing)" },
 };
 
 // combo：keys 为后端英文键（稳定不变），zh/en 为前端显示文字
@@ -712,25 +713,25 @@ function setupModelLoaderNode(node) {
     const flw = node.widgets?.find((w) => w.name === c.file);
     if (!fw || !flw) continue;
 
-    // 状态行（● 模型名 · 类型 · 状态）→ 插到模型下拉之前
+    // 每组顺序：①文件夹 → ②信号灯行 → ③模型选择 → ④专属选项 → ⑤选择模型文件夹按钮
+    // 状态行（● 模型名 · 类型 · 状态）→ 放在模型下拉之前
     const el = makeStatusBlock();
-    const w = addDOMWidgetSafe(node, "zouyu_group_" + c.kind, el);
-    if (w) moveWidgetBefore(node, w, flw);
+    const statusW = addDOMWidgetSafe(node, "zouyu_group_" + c.kind, el);
+    if (statusW) moveWidgetBefore(node, statusW, flw);
     node.__zouyuStatus[c.kind] = { el, folderWidget: fw, fileWidget: flw };
 
-    // 该模型专属选项（权重精度/编码器类型等）移到模型下拉之后
+    // ①文件夹控件排第一（移到状态行之前）
+    if (statusW) moveWidgetBefore(node, fw, statusW);
+
+    // ④该模型专属选项（权重精度/编码器类型等）移到模型下拉之后
+    let lastInGroup = flw;
     for (const optName of LOADER_OPTS[c.kind] || []) {
       const ow = node.widgets?.find((x) => x.name === optName);
-      if (ow) moveWidgetAfter(node, ow, flw);
+      if (ow) {
+        moveWidgetAfter(node, ow, lastInGroup);
+        lastInGroup = ow;
+      }
     }
-
-    // 文件夹名称显示（folder 控件）移到专属选项之后
-    moveWidgetAfter(node, fw, flw);
-    // 与"选择模型文件夹"按钮之间间隔开
-    const gapEl = document.createElement("div");
-    gapEl.className = "zouyu-gap";
-    const gapW = addDOMWidgetSafe(node, "zouyu_gap_" + c.kind, gapEl);
-    if (gapW) moveWidgetAfter(node, gapW, fw);
 
     // 手动修改文件夹文本时联动刷新文件列表与状态显示
     const origFolderCallback = fw.callback;
@@ -747,11 +748,17 @@ function setupModelLoaderNode(node) {
       return r;
     };
 
-    // "选择模型文件夹"按钮：直接打开系统文件夹选择对话框
+    // ⑤"选择模型文件夹"按钮 → 放在组内最后（专属选项之后），中间不断开
     const btn = addButton(node, "📁 选择模型文件夹", "📁 Choose Model Folder", () => {
       pickModelFolder(node, c.category, fw, flw);
     });
-    moveWidgetAfter(node, btn, gapW || fw);
+    moveWidgetAfter(node, btn, lastInGroup);
+
+    // 组与组之间隔断（空行）
+    const gapEl = document.createElement("div");
+    gapEl.className = "zouyu-gap";
+    const gapW = addDOMWidgetSafe(node, "zouyu_gap_" + c.kind, gapEl);
+    if (gapW) moveWidgetAfter(node, gapW, btn);
   }
 
   addButton(node, "🔄 刷新文件", "🔄 Refresh", async () => {

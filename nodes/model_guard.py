@@ -125,7 +125,13 @@ def register(kind, name, obj, model_type=""):
 def watch(kind, patcher):
     """节点2 观测模型（通用于任意工作流、任意模型类型）"""
     with _LOCK:
-        _REGISTRY["watched"][id(patcher)] = {"kind": kind, "patcher": patcher, "ts": _now()}
+        prev = _REGISTRY["watched"].get(id(patcher))
+        ever_loaded = bool(prev and prev.get("ever_loaded"))
+        if residency(patcher) == "gpu":
+            ever_loaded = True
+        _REGISTRY["watched"][id(patcher)] = {
+            "kind": kind, "patcher": patcher, "ts": _now(), "ever_loaded": ever_loaded,
+        }
         cutoff = _now() - _WATCHED_TTL
         for k in [k for k, v in _REGISTRY["watched"].items() if v["ts"] < cutoff]:
             _REGISTRY["watched"].pop(k, None)
@@ -134,6 +140,7 @@ def watch(kind, patcher):
         if kind in _REGISTRY["models"] and _REGISTRY["models"][kind]["patcher"] is patcher:
             _REGISTRY["models"][kind]["state"] = residency(patcher)
             _REGISTRY["models"][kind]["ts"] = _now()
+        return ever_loaded
 
 
 def record_signal(kind, state):
@@ -174,12 +181,14 @@ def evaluate_idle(kind, patcher, zh):
 
     返回 (说明文本, 动作后状态, action)，action ∈ {"none", "official", "unload"}。
     - 开关关闭：只记录闲置信号，交给官方管理（状态会由官方卸载变为 cpu/蓝色）。
-    - 开关开启且模型在显存（gpu）：说明已被调用过且已空闲 → 彻底卸载。
-    - 从未加载 / 已在 CPU：无事可做，跳过。
+    - 开关开启：
+      - 模型在显存（gpu）：说明已被调用过且本节点之后不再使用 → 彻底卸载（显存+内存）。
+      - 模型在 CPU 缓存（cpu）：动态模型继续释放 CPU 内存；传统模型仅提示无法释放。
+      - 完全卸载（free）/从未加载：无需处理。
     """
     switch = get_switch()
     st = residency(patcher)
-    watch(kind, patcher)
+    ever_loaded = watch(kind, patcher)
     record_signal(kind, st)
     label = KIND_LABELS.get(kind, kind)
     if not switch:
@@ -190,9 +199,20 @@ def evaluate_idle(kind, patcher, zh):
         if freed_ram > 0:
             return ("[{}] 空闲 → 已彻底卸载（显存+CPU内存）".format(label), st2, "unload")
         return ("[{}] 空闲 → 已卸载到CPU内存（传统模型不支持释放内存）".format(label), st2, "unload")
-    if st == "free":
-        return ("[{}] 已完全卸载，无需处理".format(label), st, "none")
-    return ("[{}] 尚未被调用（或已在CPU缓存），跳过".format(label), st, "none")
+    if st == "cpu":
+        freed_ram = 0
+        try:
+            if patcher.is_dynamic():
+                freed_ram = int(patcher.partially_unload_ram(1e32) or 0)
+        except Exception:
+            freed_ram = 0
+        st2 = residency(patcher)
+        if freed_ram > 0:
+            return ("[{}] 已在CPU缓存 → 已释放CPU内存".format(label), st2, "unload")
+        if ever_loaded:
+            return ("[{}] 已卸载到CPU（传统模型无法释放内存）".format(label), st2, "none")
+        return ("[{}] 尚未被调用（或已在CPU缓存），跳过".format(label), st2, "none")
+    return ("[{}] 已完全卸载，无需处理".format(label), st, "none")
 
 
 def status_payload():
@@ -453,16 +473,19 @@ class ZouyuModelGuard(io.ComfyNode):
             display_name="Zouyu 模型占用检测 (Model Guard)",
             category="ZouyuAI/SeedTensor",
             description=(
-                "接在每个模型连线上（MODEL/CLIP/VAE 可同时接多个）。当本节点执行时（所有下游"
-                "消费者已运行完毕），判定模型空闲并通知模型加载器。若模型加载器的『低显存模式』"
-                "开启，立即把该模型从显存（DynamicVRAM 模型含 CPU 内存）彻底卸载；关闭则交由"
-                "官方模型管理自动卸载到 CPU 内存。"
+                "接在每个模型连线上（MODEL/CLIP/VAE 可同时接多个），当本节点执行时判定模型是否"
+                "空闲并按低显存开关执行卸载。『触发』输入（任意类型，可接 conditioning/采样结果等）"
+                "用于控制执行时机：例如接在文本编码节点之后、采样节点之前，即可在编码完成后立刻把"
+                "CLIP/VAE 彻底卸载，让采样模型独享显存；采样结束后解码节点会自动重新加载所需 VAE。"
+                "开关关闭则交由官方模型管理自动卸载到 CPU 内存。"
             ),
             inputs=[
                 io.Model.Input("model", optional=True, tooltip="视频模型（DiT）"),
                 io.Clip.Input("clip", optional=True, tooltip="文本编码器"),
                 io.Vae.Input("vae", optional=True, tooltip="视频 VAE"),
                 io.Vae.Input("audio_vae", optional=True, tooltip="音频 VAE"),
+                io.AnyType.Input("trigger", optional=True,
+                                 tooltip="触发（任意类型）：控制本节点执行时机，值会被忽略"),
                 io.Combo.Input("language", options=["中文", "English"], default="中文"),
             ],
             outputs=[
@@ -475,7 +498,8 @@ class ZouyuModelGuard(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, model=None, clip=None, vae=None, audio_vae=None, language="中文") -> io.NodeOutput:
+    def execute(cls, model=None, clip=None, vae=None, audio_vae=None, trigger=None,
+                language="中文") -> io.NodeOutput:
         zh = (language != "English")
         lines = []
         for kind, obj in (("unet", model), ("clip", clip), ("vae", vae), ("audio_vae", audio_vae)):
@@ -485,6 +509,9 @@ class ZouyuModelGuard(io.ComfyNode):
             msg, _st, _action = evaluate_idle(kind, patcher, zh)
             log_event(msg)
             lines.append(msg)
+        if trigger is not None and lines:
+            lines.insert(0, ("触发已就绪：编码阶段完成，执行空闲卸载策略" if zh
+                             else "trigger ready: encode phase done, applying idle policy"))
         text = "\n".join(lines) if lines else (
             "（未连接任何模型，仅透传）" if zh else "(no model connected, pass-through only)")
         return io.NodeOutput(model, clip, vae, audio_vae, text, ui={"text": [text]})

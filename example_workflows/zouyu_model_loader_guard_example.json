@@ -1,0 +1,367 @@
+{
+  "id": "zouyu-model-loader-guard-example",
+  "revision": 0,
+  "last_node_id": 12,
+  "last_link_id": 23,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "ZouyuModelLoader",
+      "pos": [-1150, 40],
+      "size": [360, 420],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        { "name": "unet_folder", "type": "STRING", "link": null, "widget": { "name": "unet_folder" } },
+        { "name": "unet_name", "type": "COMBO", "link": null, "widget": { "name": "unet_name" } },
+        { "name": "weight_dtype", "type": "COMBO", "link": null, "widget": { "name": "weight_dtype" } },
+        { "name": "clip_folder", "type": "STRING", "link": null, "widget": { "name": "clip_folder" } },
+        { "name": "clip_name", "type": "COMBO", "link": null, "widget": { "name": "clip_name" } },
+        { "name": "clip_type", "type": "COMBO", "link": null, "widget": { "name": "clip_type" } },
+        { "name": "clip_device", "type": "COMBO", "link": null, "widget": { "name": "clip_device" } },
+        { "name": "vae_folder", "type": "STRING", "link": null, "widget": { "name": "vae_folder" } },
+        { "name": "vae_name", "type": "COMBO", "link": null, "widget": { "name": "vae_name" } },
+        { "name": "audio_vae_folder", "type": "STRING", "link": null, "widget": { "name": "audio_vae_folder" } },
+        { "name": "audio_vae_name", "type": "COMBO", "link": null, "widget": { "name": "audio_vae_name" } },
+        { "name": "low_vram_mode", "type": "BOOLEAN", "link": null, "widget": { "name": "low_vram_mode" } },
+        { "name": "language", "type": "COMBO", "link": null, "widget": { "name": "language" } }
+      ],
+      "outputs": [
+        { "name": "MODEL", "type": "MODEL", "links": [1, 5, 16] },
+        { "name": "CLIP", "type": "CLIP", "links": [2, 6] },
+        { "name": "VAE", "type": "VAE", "links": [3, 7, 19] },
+        { "name": "VAE", "type": "VAE", "links": [4, 8, 20] },
+        { "name": "状态", "type": "STRING", "links": [] }
+      ],
+      "title": "Zouyu 模型加载器",
+      "properties": { "Node name for S&R": "ZouyuModelLoader" },
+      "widgets_values": [
+        "diffusion_models",
+        "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+        "default",
+        "text_encoders",
+        "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "minimax",
+        "default",
+        "vae",
+        "minimax_h3_video_vae_fp16.safetensors",
+        "vae",
+        "minimax_h3_audio_vae_fp32.safetensors",
+        true,
+        "中文"
+      ]
+    },
+    {
+      "id": 2,
+      "type": "MiniMaxH3ReferenceToVideo",
+      "pos": [-640, 40],
+      "size": [340, 320],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        { "name": "clip", "type": "CLIP", "link": 2 },
+        { "name": "vae", "type": "VAE", "link": 3 },
+        { "name": "audio_vae", "type": "VAE", "link": 4 },
+        { "name": "prompt", "type": "STRING", "link": null, "widget": { "name": "prompt" } },
+        { "name": "width", "type": "INT", "link": null, "widget": { "name": "width" } },
+        { "name": "height", "type": "INT", "link": null, "widget": { "name": "height" } },
+        { "name": "length", "type": "INT", "link": null, "widget": { "name": "length" } },
+        { "name": "ref_image_size", "type": "COMBO", "link": null, "widget": { "name": "ref_image_size" } }
+      ],
+      "outputs": [
+        { "name": "CONDITIONING", "type": "CONDITIONING", "links": [9, 10] },
+        { "name": "LATENT", "type": "LATENT", "links": [11] }
+      ],
+      "title": "MiniMax H3 Reference to Video",
+      "properties": { "Node name for S&R": "MiniMaxH3ReferenceToVideo" },
+      "widgets_values": ["一个角色在森林中行走", 1344, 768, 124, "match"]
+    },
+    {
+      "id": 3,
+      "type": "ZouyuModelGuard",
+      "pos": [-640, 420],
+      "size": [340, 160],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        { "name": "model", "type": "MODEL", "link": null },
+        { "name": "clip", "type": "CLIP", "link": 6 },
+        { "name": "vae", "type": "VAE", "link": 7 },
+        { "name": "audio_vae", "type": "VAE", "link": 8 },
+        { "name": "trigger", "type": "*", "link": 9 },
+        { "name": "language", "type": "COMBO", "link": null, "widget": { "name": "language" } }
+      ],
+      "outputs": [
+        { "name": "MODEL", "type": "MODEL", "links": [] },
+        { "name": "CLIP", "type": "CLIP", "links": [] },
+        { "name": "VAE", "type": "VAE", "links": [] },
+        { "name": "VAE", "type": "VAE", "links": [] },
+        { "name": "日志", "type": "STRING", "links": [] }
+      ],
+      "title": "Zouyu 模型占用检测（编码后卸载 CLIP/VAE）",
+      "properties": { "Node name for S&R": "ZouyuModelGuard" },
+      "widgets_values": ["中文"]
+    },
+    {
+      "id": 4,
+      "type": "BasicGuider",
+      "pos": [-250, 40],
+      "size": [200, 60],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        { "name": "model", "type": "MODEL", "link": 1 },
+        { "name": "conditioning", "type": "CONDITIONING", "link": 10 }
+      ],
+      "outputs": [
+        { "name": "GUIDER", "type": "GUIDER", "links": [12] }
+      ],
+      "title": "Basic Guider",
+      "properties": { "Node name for S&R": "BasicGuider" },
+      "widgets_values": []
+    },
+    {
+      "id": 5,
+      "type": "RandomNoise",
+      "pos": [-30, 300],
+      "size": [200, 40],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        { "name": "noise_seed", "type": "INT", "link": null, "widget": { "name": "noise_seed" } }
+      ],
+      "outputs": [
+        { "name": "NOISE", "type": "NOISE", "links": [13] }
+      ],
+      "title": "RandomNoise",
+      "properties": { "Node name for S&R": "RandomNoise" },
+      "widgets_values": [0]
+    },
+    {
+      "id": 6,
+      "type": "KSamplerSelect",
+      "pos": [-30, 390],
+      "size": [200, 40],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        { "name": "sampler_name", "type": "COMBO", "link": null, "widget": { "name": "sampler_name" } }
+      ],
+      "outputs": [
+        { "name": "SAMPLER", "type": "SAMPLER", "links": [14] }
+      ],
+      "title": "KSamplerSelect",
+      "properties": { "Node name for S&R": "KSamplerSelect" },
+      "widgets_values": ["euler"]
+    },
+    {
+      "id": 7,
+      "type": "BasicScheduler",
+      "pos": [-250, 200],
+      "size": [200, 80],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        { "name": "model", "type": "MODEL", "link": 5 },
+        { "name": "scheduler", "type": "COMBO", "link": null, "widget": { "name": "scheduler" } },
+        { "name": "steps", "type": "INT", "link": null, "widget": { "name": "steps" } },
+        { "name": "denoise", "type": "FLOAT", "link": null, "widget": { "name": "denoise" } }
+      ],
+      "outputs": [
+        { "name": "SIGMAS", "type": "SIGMAS", "links": [15] }
+      ],
+      "title": "BasicScheduler",
+      "properties": { "Node name for S&R": "BasicScheduler" },
+      "widgets_values": ["simple", 30, 1.0]
+    },
+    {
+      "id": 8,
+      "type": "SamplerCustomAdvanced",
+      "pos": [240, 40],
+      "size": [280, 160],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        { "name": "noise", "type": "NOISE", "link": 13 },
+        { "name": "guider", "type": "GUIDER", "link": 12 },
+        { "name": "sampler", "type": "SAMPLER", "link": 14 },
+        { "name": "sigmas", "type": "SIGMAS", "link": 15 },
+        { "name": "latent_image", "type": "LATENT", "link": 11 }
+      ],
+      "outputs": [
+        { "name": "output", "type": "LATENT", "links": [17, 18] },
+        { "name": "denoised_output", "type": "LATENT", "links": [] }
+      ],
+      "title": "SamplerCustomAdvanced",
+      "properties": { "Node name for S&R": "SamplerCustomAdvanced" },
+      "widgets_values": []
+    },
+    {
+      "id": 9,
+      "type": "ZouyuModelGuard",
+      "pos": [620, 40],
+      "size": [340, 140],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        { "name": "model", "type": "MODEL", "link": 16 },
+        { "name": "clip", "type": "CLIP", "link": null },
+        { "name": "vae", "type": "VAE", "link": null },
+        { "name": "audio_vae", "type": "VAE", "link": null },
+        { "name": "trigger", "type": "*", "link": 17 },
+        { "name": "language", "type": "COMBO", "link": null, "widget": { "name": "language" } }
+      ],
+      "outputs": [
+        { "name": "MODEL", "type": "MODEL", "links": [] },
+        { "name": "CLIP", "type": "CLIP", "links": [] },
+        { "name": "VAE", "type": "VAE", "links": [] },
+        { "name": "VAE", "type": "VAE", "links": [] },
+        { "name": "日志", "type": "STRING", "links": [] }
+      ],
+      "title": "Zouyu 模型占用检测（采样后卸载 DiT）",
+      "properties": { "Node name for S&R": "ZouyuModelGuard" },
+      "widgets_values": ["中文"]
+    },
+    {
+      "id": 10,
+      "type": "ZouyuVAEDecodeAV",
+      "pos": [1040, 40],
+      "size": [280, 140],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        { "name": "samples", "type": "LATENT", "link": 18 },
+        { "name": "vae_image", "type": "VAE", "link": 19 },
+        { "name": "vae_audio", "type": "VAE", "link": 20 },
+        { "name": "language", "type": "COMBO", "link": null, "widget": { "name": "language" } }
+      ],
+      "outputs": [
+        { "name": "images", "type": "IMAGE", "links": [21] },
+        { "name": "audio", "type": "AUDIO", "links": [22] }
+      ],
+      "title": "音视频联合解码",
+      "properties": { "Node name for S&R": "ZouyuVAEDecodeAV" },
+      "widgets_values": ["中文"]
+    },
+    {
+      "id": 11,
+      "type": "CreateVideo",
+      "pos": [1370, 60],
+      "size": [240, 60],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        { "name": "images", "type": "IMAGE", "link": 21 },
+        { "name": "audio", "type": "AUDIO", "link": 22 }
+      ],
+      "outputs": [
+        { "name": "VIDEO", "type": "VIDEO", "links": [23] }
+      ],
+      "title": "CreateVideo",
+      "properties": { "Node name for S&R": "CreateVideo" },
+      "widgets_values": []
+    },
+    {
+      "id": 12,
+      "type": "SaveVideo",
+      "pos": [1660, 80],
+      "size": [240, 60],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        { "name": "video", "type": "VIDEO", "link": 23 }
+      ],
+      "outputs": [],
+      "title": "SaveVideo",
+      "properties": { "Node name for S&R": "SaveVideo" },
+      "widgets_values": ["zouyu_guard_demo"]
+    }
+  ],
+  "links": [
+    [1, 1, 0, 4, 0, "MODEL"],
+    [2, 1, 1, 2, 0, "CLIP"],
+    [3, 1, 2, 2, 1, "VAE"],
+    [4, 1, 3, 2, 2, "VAE"],
+    [5, 1, 0, 7, 0, "MODEL"],
+    [6, 1, 1, 3, 1, "CLIP"],
+    [7, 1, 2, 3, 2, "VAE"],
+    [8, 1, 3, 3, 3, "VAE"],
+    [9, 2, 0, 3, 4, "CONDITIONING"],
+    [10, 2, 0, 4, 1, "CONDITIONING"],
+    [11, 2, 1, 8, 4, "LATENT"],
+    [12, 4, 0, 8, 1, "GUIDER"],
+    [13, 5, 0, 8, 0, "NOISE"],
+    [14, 6, 0, 8, 2, "SAMPLER"],
+    [15, 7, 0, 8, 3, "SIGMAS"],
+    [16, 1, 0, 9, 0, "MODEL"],
+    [17, 8, 0, 9, 4, "LATENT"],
+    [18, 8, 0, 10, 0, "LATENT"],
+    [19, 1, 2, 10, 1, "VAE"],
+    [20, 1, 3, 10, 2, "VAE"],
+    [21, 10, 0, 11, 0, "IMAGE"],
+    [22, 10, 1, 11, 1, "AUDIO"],
+    [23, 11, 0, 12, 0, "VIDEO"]
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "title": "模型加载（低显存模式开启）",
+      "bounding": [-1160, 20, 380, 460],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "编码阶段（使用 CLIP + VAE）",
+      "bounding": [-660, 20, 380, 340],
+      "color": "#8A8",
+      "flags": {}
+    },
+    {
+      "id": 3,
+      "title": "编码后：触发式卸载 CLIP/VAE（红色=已彻底卸载）",
+      "bounding": [-660, 400, 360, 180],
+      "color": "#b58",
+      "flags": {}
+    },
+    {
+      "id": 4,
+      "title": "采样阶段（DiT 独享显存）",
+      "bounding": [-260, 20, 800, 360],
+      "color": "#b0722a",
+      "flags": {}
+    },
+    {
+      "id": 5,
+      "title": "采样后：卸载 DiT → 解码自动重新加载 VAE",
+      "bounding": [600, 20, 360, 160],
+      "color": "#2f6b8f",
+      "flags": {}
+    },
+    {
+      "id": 6,
+      "title": "解码与输出",
+      "bounding": [1020, 20, 900, 200],
+      "color": "#8A8",
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "frontendVersion": "1.23.0",
+    "note": "低显存模式示例：① ZouyuModelLoader 开启『低显存模式』；② MiniMaxH3ReferenceToVideo 编码阶段使用 CLIP+VAE；③ 编码完成后，guard1（trigger 接 conditioning）把 CLIP/VAE 彻底卸载（显存+内存，状态灯变红），DiT 采样独享显存；④ 采样结束后 guard2（trigger 接采样输出）卸载 DiT；⑤ ZouyuVAEDecodeAV 解码时按需自动重新加载 VAE。"
+  },
+  "version": 0.4
+}
