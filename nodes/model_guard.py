@@ -210,39 +210,99 @@ def status_payload():
 
 
 # ---------------------------------------------------------------------------
-# 文件夹 / 文件列表（前端"文件夹选择"用）
+# 文件夹 / 文件列表（前端"选择模型文件夹"用）
 # ---------------------------------------------------------------------------
 
-def list_folders(category):
-    roots = folder_paths.get_folder_paths(category)
-    root = roots[0] if roots else ""
-    folders = ["."]
-    seen = set()
-    for r in roots:
-        if not os.path.isdir(r):
-            continue
-        try:
-            names = sorted(os.listdir(r))
-        except OSError:
-            continue
-        for d in names:
-            p = os.path.join(r, d)
-            if os.path.isdir(p) and d not in seen:
-                seen.add(d)
+def _models_root():
+    """ComfyUI/models 目录绝对路径（由 vae 分类根目录推导）。"""
+    roots = folder_paths.get_folder_paths("vae")
+    if roots:
+        return os.path.dirname(os.path.abspath(roots[0]))
+    roots = folder_paths.get_folder_paths("diffusion_models")
+    return os.path.dirname(os.path.abspath(roots[0])) if roots else ""
+
+
+def _safe_join(base, rel):
+    """把 rel 安全拼到 base 下，拒绝越界（防路径穿越）。"""
+    base = os.path.abspath(base)
+    target = os.path.abspath(os.path.join(base, rel)) if rel else base
+    if os.path.commonpath([base, target]) != base:
+        raise ValueError("path out of root")
+    return target
+
+
+def browse_dir(category, folder):
+    """浏览 models 目录：folder 为相对 models 根的空/相对路径（"" = models 根）。
+    返回当前目录绝对路径、一级子文件夹、上级目录相对路径。"""
+    models_root = _models_root()
+    rel = (folder or "").strip().strip("/\\")
+    current = _safe_join(models_root, rel)
+    folders = []
+    try:
+        for d in sorted(os.listdir(current)):
+            if os.path.isdir(os.path.join(current, d)):
                 folders.append(d)
-    return {"category": category, "root": root, "folders": folders}
+    except OSError:
+        pass
+    up = "/".join(rel.split("/")[:-1]) if rel else ""
+    return {
+        "category": category,
+        "models_root": models_root,
+        "current": current,
+        "rel": rel,
+        "up": up,
+        "folders": folders,
+    }
+
+
+def pick_category_rel(category, rel_from_models):
+    """把 models 根下的相对路径换算为该分类根下的相对路径。
+    选中分类根目录本身返回分类名；不在分类搜索目录内返回 None。"""
+    try:
+        abs_target = _safe_join(_models_root(), rel_from_models)
+    except ValueError:
+        return None
+    for root in folder_paths.get_folder_paths(category):
+        root_abs = os.path.abspath(root)
+        try:
+            r = os.path.relpath(abs_target, root_abs)
+        except ValueError:
+            continue
+        if r == ".":
+            return category
+        if not r.startswith(".."):
+            return r.replace("\\", "/")
+    return None
 
 
 def list_files(category, folder):
+    """列出分类根目录（folder 为分类名/空/"."）或某子文件夹下的模型文件。"""
     allowed = folder_paths.get_filename_list(category)
     folder = (folder or "").strip().strip("/\\")
     if folder in ("", ".", category):
-        # 根目录（folder 控件默认值即分类名，如 "diffusion_models"）
         out = [f for f in allowed if "/" not in f and "\\" not in f]
     else:
         prefix = folder.replace("\\", "/").rstrip("/") + "/"
         out = [f for f in allowed if f.replace("\\", "/").startswith(prefix)]
     return {"category": category, "folder": folder or ".", "files": out}
+
+
+def reveal_path(path):
+    """在操作系统的文件资源管理器中打开（Windows explorer.exe）。"""
+    try:
+        if not path:
+            return {"ok": False, "error": "empty path"}
+        models_root = _models_root()
+        target = os.path.abspath(path)
+        if os.path.commonpath([models_root, target]) != models_root:
+            return {"ok": False, "error": "path outside models root"}
+        if os.name != "nt":
+            return {"ok": False, "error": "only supported on Windows"}
+        import subprocess
+        subprocess.Popen(["explorer.exe", target])
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 def register_routes():
@@ -256,15 +316,30 @@ def register_routes():
     except Exception:
         return
 
-    @routes.get("/zouyu_model_loader/folders")
-    async def _folders(request):
-        return web.json_response(list_folders(request.query.get("category", "diffusion_models")))
-
     @routes.get("/zouyu_model_loader/files")
     async def _files(request):
         return web.json_response(list_files(
             request.query.get("category", "diffusion_models"),
             request.query.get("folder", ".")))
+
+    @routes.get("/zouyu_model_loader/browse")
+    async def _browse(request):
+        return web.json_response(browse_dir(
+            request.query.get("category", "diffusion_models"),
+            request.query.get("folder", "")))
+
+    @routes.get("/zouyu_model_loader/pick")
+    async def _pick(request):
+        folder = pick_category_rel(
+            request.query.get("category", "diffusion_models"),
+            request.query.get("rel", ""))
+        if folder is None:
+            return web.json_response({"ok": False, "error": "所选文件夹不在该模型分类的搜索目录内"})
+        return web.json_response({"ok": True, "folder": folder})
+
+    @routes.get("/zouyu_model_loader/reveal")
+    async def _reveal(request):
+        return web.json_response(reveal_path(request.query.get("path", "")))
 
     @routes.get("/zouyu_model_loader/status")
     async def _status(request):
@@ -282,7 +357,7 @@ class ZouyuModelGuard(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="ZouyuModelGuard",
-            display_name="模型占用检测 (Zouyu Guard)",
+            display_name="Zouyu 模型占用检测 (Model Guard)",
             category="ZouyuAI/SeedTensor",
             description=(
                 "接在每个模型连线上（MODEL/CLIP/VAE 可同时接多个）。当本节点执行时（所有下游"

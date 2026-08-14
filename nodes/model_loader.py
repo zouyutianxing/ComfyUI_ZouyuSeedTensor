@@ -110,32 +110,35 @@ class ZouyuModelLoader(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="ZouyuModelLoader",
-            display_name="模型加载器 (Zouyu Loader)",
+            display_name="Zouyu 模型加载器 (Model Loader)",
             category="ZouyuAI/SeedTensor",
             description=(
                 "集成 MiniMax H3 示例工作流的四个模型加载（UNET/CLIP/视频VAE/音频VAE），与官方 "
-                "UNETLoader/CLIPLoader/VAELoader 完全等价。每个模型的『文件夹』默认值即官方加载器"
-                "使用的目录；前端『📁』按钮可跳转到 models 目录选择子文件夹。状态灯：绿=已加载(GPU)、"
-                "蓝=CPU缓存、红=未加载。『低显存模式』开启后，节点2检测到模型空闲会从显存+CPU内存"
-                "彻底卸载；关闭则交由官方管理卸载到CPU内存。"
+                "UNETLoader/CLIPLoader/VAELoader 完全等价。每个模型的『选择模型文件夹』按钮会打开"
+                "models 目录浏览器（可一键在操作系统的资源管理器中打开）；选择后文件夹名显示在模型"
+                "上方，模型下拉自动跳到该文件夹。状态灯：绿=已加载(GPU)、蓝=CPU缓存、红=未加载。"
+                "『低显存模式』开启后，节点2检测到模型空闲会从显存+CPU内存彻底卸载；关闭则交由"
+                "官方管理卸载到CPU内存。"
             ),
             inputs=[
-                io.String.Input("unet_folder", default="diffusion_models",
+                io.String.Input("unet_folder", default="diffusion_models", advanced=True,
                                 tooltip="UNET 子文件夹（相对 ComfyUI/models 目录）"),
                 io.Combo.Input("unet_name", options=_file_options("diffusion_models"),
                                tooltip="扩散模型文件（含子文件夹路径）"),
                 io.Combo.Input("weight_dtype", options=WEIGHT_DTYPES, default="default", advanced=True,
                                tooltip="权重精度（同官方 UNETLoader）"),
-                io.String.Input("clip_folder", default="text_encoders",
+                io.String.Input("clip_folder", default="text_encoders", advanced=True,
                                 tooltip="文本编码器子文件夹（相对 models 目录）"),
                 io.Combo.Input("clip_name", options=_file_options("text_encoders"),
                                tooltip="文本编码器文件"),
                 io.Combo.Input("clip_type", options=CLIP_TYPES, default="minimax",
                                tooltip="文本编码器类型（MiniMax H3 用 minimax）"),
                 io.Combo.Input("clip_device", options=["default", "cpu"], default="default", advanced=True),
-                io.String.Input("vae_folder", default="vae", tooltip="视频VAE子文件夹（相对 models 目录）"),
+                io.String.Input("vae_folder", default="vae", advanced=True,
+                                tooltip="视频VAE子文件夹（相对 models 目录）"),
                 io.Combo.Input("vae_name", options=_file_options("vae"), tooltip="视频VAE文件"),
-                io.String.Input("audio_vae_folder", default="vae", tooltip="音频VAE子文件夹"),
+                io.String.Input("audio_vae_folder", default="vae", advanced=True,
+                                tooltip="音频VAE子文件夹"),
                 io.Combo.Input("audio_vae_name", options=_file_options("vae"), tooltip="音频VAE文件"),
                 io.Boolean.Input("low_vram_mode", default=False,
                                  label_on="彻底卸载", label_off="CPU缓存",

@@ -117,8 +117,8 @@ const TITLES = {
   ZouyuSeedCatalog: { zh: "种子目录", en: "Seed Catalog" },
   ZouyuSeedPreview: { zh: "种子预览", en: "Seed Preview" },
   ZouyuClearTemp: { zh: "清空临时存储", en: "Clear Temp Storage" },
-  ZouyuModelLoader: { zh: "模型加载器", en: "Model Loader" },
-  ZouyuModelGuard: { zh: "模型占用检测", en: "Model Guard" },
+  ZouyuModelLoader: { zh: "Zouyu 模型加载器", en: "Zouyu Model Loader" },
+  ZouyuModelGuard: { zh: "Zouyu 模型占用检测", en: "Zouyu Model Guard" },
 };
 
 const NODE_COLORS = {
@@ -226,9 +226,15 @@ function applyLanguage(node, lang) {
       continue;
     }
     const bl = BOOL_LABELS[w.name];
-    if (bl && w.options) {
-      w.options.label_on = zh ? bl.zh[0] : bl.en[0];
-      w.options.label_off = zh ? bl.zh[1] : bl.en[1];
+    if (bl) {
+      const on = zh ? bl.zh[0] : bl.en[0];
+      const off = zh ? bl.zh[1] : bl.en[1];
+      if (w.options) {
+        w.options.label_on = on;
+        w.options.label_off = off;
+      }
+      if (typeof w.label_on === "string") w.label_on = on;
+      if (typeof w.label_off === "string") w.label_off = off;
     }
     const cb = COMBOS[w.name];
     if (cb && w.type === "combo") {
@@ -258,6 +264,8 @@ function applyLanguage(node, lang) {
     }
     if (label) out.label = label;
   }
+
+  if (node.__zouyuStatus) refreshStatusDOM(node);
 
   app.graph?.setDirtyCanvas(true, false);
 }
@@ -468,49 +476,136 @@ function addButton(node, keyZh, keyEn, onClick) {
 // ---------------------------------------------------------------------------
 
 const LOADER_MODELS = [
-  { folder: "unet_folder", file: "unet_name", category: "diffusion_models" },
-  { folder: "clip_folder", file: "clip_name", category: "text_encoders" },
-  { folder: "vae_folder", file: "vae_name", category: "vae" },
-  { folder: "audio_vae_folder", file: "audio_vae_name", category: "vae" },
+  { kind: "unet", folder: "unet_folder", file: "unet_name", category: "diffusion_models" },
+  { kind: "clip", folder: "clip_folder", file: "clip_name", category: "text_encoders" },
+  { kind: "vae", folder: "vae_folder", file: "vae_name", category: "vae" },
+  { kind: "audio_vae", folder: "audio_vae_folder", file: "audio_vae_name", category: "vae" },
 ];
 
-let loaderNodes = new Set();
-let statusTimer = null;
+const KIND_NAMES = {
+  unet: { zh: "UNET 模型", en: "UNET Model" },
+  clip: { zh: "文本编码器", en: "CLIP" },
+  vae: { zh: "视频VAE", en: "Video VAE" },
+  audio_vae: { zh: "音频VAE", en: "Audio VAE" },
+};
 
-function setNodeBadges(node, badges) {
-  if (!node) return;
+const STATE_INFO = {
+  gpu: { zh: "已加载(GPU)", en: "Loaded (GPU)", color: "#4caf50" },
+  cpu: { zh: "CPU缓存", en: "CPU cached", color: "#2196f3" },
+  free: { zh: "未加载", en: "Not loaded", color: "#f44336" },
+  unknown: { zh: "未知", en: "Unknown", color: "#9e9e9e" },
+};
+
+function stateText(state, lang) {
+  const e = STATE_INFO[state] || STATE_INFO.unknown;
+  return lang !== "English" ? e.zh : e.en;
+}
+
+const STATUS_STYLE = `
+.zouyu-status-block{padding:2px 4px;min-width:130px}
+.zouyu-status-block .zouyu-folder-line{display:flex;align-items:center;gap:4px;color:#8fd0ff;font-weight:600;font-size:12px;line-height:1.5;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.zouyu-status-block .zouyu-model-line{display:flex;align-items:center;gap:6px;font-size:12px;line-height:1.6}
+.zouyu-status-block .dot{width:10px;height:10px;border-radius:50%;flex:none;border:1px solid rgba(0,0,0,.4);box-shadow:0 0 4px rgba(0,0,0,.5)}
+.zouyu-status-block .zn{color:#e8e8e8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:190px}
+.zouyu-status-block .zs{color:#9a9a9a;font-size:11px;flex:none}
+.zouyu-group-gap{height:12px}
+`;
+
+let statusStylesInjected = false;
+
+function ensureStatusStyles() {
+  if (statusStylesInjected) return;
+  statusStylesInjected = true;
+  const el = document.createElement("style");
+  el.textContent = STATUS_STYLE;
+  document.head.appendChild(el);
+}
+
+function addDOMWidgetSafe(node, name, element) {
+  if (node.widgets?.find((w) => w.name === name)) return null;
   try {
-    if (typeof node.setBadges === "function") {
-      node.setBadges(badges);
-    } else {
-      node.badges = badges;
-    }
+    return node.addDOMWidget(name, "div", element, { serialize: false });
   } catch (e) {
-    /* 旧版前端忽略徽章 */
+    console.error("[ZouyuSeedTensor] addDOMWidget failed:", e);
+    return null;
   }
 }
 
-function statusBadges(payload, lang) {
+function moveWidgetBefore(node, widget, beforeWidget) {
+  if (!widget || !beforeWidget) return;
+  const arr = node.widgets;
+  const wIdx = arr.indexOf(widget);
+  const bIdx = arr.indexOf(beforeWidget);
+  if (wIdx < 0 || bIdx < 0) return;
+  arr.splice(wIdx, 1);
+  arr.splice(Math.max(0, arr.indexOf(beforeWidget)), 0, widget);
+}
+
+function moveWidgetAfter(node, widget, afterWidget) {
+  if (!widget || !afterWidget) return;
+  const arr = node.widgets;
+  const wIdx = arr.indexOf(widget);
+  const aIdx = arr.indexOf(afterWidget);
+  if (wIdx < 0 || aIdx < 0) return;
+  arr.splice(wIdx, 1);
+  arr.splice(arr.indexOf(afterWidget) + 1, 0, widget);
+}
+
+function makeStatusBlock() {
+  const el = document.createElement("div");
+  el.className = "zouyu-status-block";
+  el.innerHTML = `
+    <div class="zouyu-folder-line">📁 <span class="zf"></span></div>
+    <div class="zouyu-model-line"><span class="dot"></span><span class="zn"></span><span class="zs"></span></div>`;
+  return el;
+}
+
+function updateStatusBlock(el, info, lang) {
+  if (!el) return;
   const zh = lang !== "English";
-  return (payload?.models || []).map((m) => ({
-    text: `${m.label}: ${zh ? m.zh : m.en}`,
-    color: m.color || "#9e9e9e",
-  }));
+  const st = STATE_INFO[info.state] || STATE_INFO.unknown;
+  el.querySelector(".dot").style.background = st.color;
+  el.querySelector(".zf").textContent = info.folderDisplay || "—";
+  el.querySelector(".zn").textContent = info.nameDisplay || "—";
+  el.querySelector(".zs").textContent = zh ? st.zh : st.en;
+}
+
+let statusNodes = new Set();
+let statusTimer = null;
+
+async function refreshStatusDOM(node) {
+  if (!node || !node.__zouyuStatus) return;
+  try {
+    const r = await fetch("/zouyu_model_loader/status");
+    if (!r.ok) return;
+    const payload = await r.json();
+    const byKind = {};
+    for (const m of payload.models || []) byKind[m.kind] = m;
+    const lang = node.__zouyuLang || getLang();
+    const zh = lang !== "English";
+    for (const [kind, info] of Object.entries(node.__zouyuStatus)) {
+      const m = byKind[kind];
+      const fv = info.folderWidget ? String(info.folderWidget.value || "") : "";
+      const folderDisplay = info.folderWidget
+        ? (fv ? fv.split(/[\\/]/).pop() : (zh ? "根目录" : "root"))
+        : "";
+      const fname = info.fileWidget ? String(info.fileWidget.value || "").split(/[\\/]/).pop() : "";
+      const kindName = KIND_NAMES[kind] ? (zh ? KIND_NAMES[kind].zh : KIND_NAMES[kind].en) : kind;
+      updateStatusBlock(info.el, {
+        state: m?.state || "unknown",
+        folderDisplay,
+        nameDisplay: info.fileWidget ? (fname || "—") : kindName,
+      }, lang);
+    }
+  } catch (e) {
+    /* 服务端未就绪时忽略 */
+  }
 }
 
 function startStatusPolling() {
   if (statusTimer) return;
   statusTimer = setInterval(async () => {
-    try {
-      const r = await fetch("/zouyu_model_loader/status");
-      if (!r.ok) return;
-      const payload = await r.json();
-      for (const node of loaderNodes) {
-        setNodeBadges(node, statusBadges(payload, node.__zouyuLang || getLang()));
-      }
-    } catch (e) {
-      /* 服务端未就绪时忽略 */
-    }
+    for (const node of [...statusNodes]) await refreshStatusDOM(node);
   }, 2500);
 }
 
@@ -529,14 +624,18 @@ async function refreshModelFiles(category, folder, fileWidget) {
 }
 
 const FOLDER_MENU_STYLE = `
-.zouyu-folder-menu{position:fixed;z-index:99999;min-width:280px;max-width:420px;max-height:320px;
+.zouyu-folder-menu{position:fixed;z-index:99999;min-width:320px;max-width:460px;max-height:340px;
   overflow:auto;background:#2a2a2a;border:1px solid #4a4a4a;border-radius:8px;
   box-shadow:0 8px 24px rgba(0,0,0,.5);padding:6px 0;font-size:12px}
 .zouyu-folder-menu.hidden{display:none}
 .zouyu-folder-head{padding:6px 12px;color:#8fd0ff;font-weight:600;word-break:break-all;border-bottom:1px solid #3a3a3a}
+.zouyu-folder-actions{display:flex;gap:6px;padding:6px 12px;border-bottom:1px solid #3a3a3a}
+.zouyu-folder-btn{flex:1;background:#3a5a7a;color:#fff;border:none;border-radius:6px;padding:5px 8px;cursor:pointer;font-size:12px}
+.zouyu-folder-btn:hover{background:#4a7aaa}
 .zouyu-folder-item{display:flex;align-items:center;gap:8px;padding:6px 12px;cursor:pointer;color:#ddd}
 .zouyu-folder-item:hover,.zouyu-folder-item.active{background:#3a3a3a;color:#fff}
 .zouyu-folder-item .tag{margin-left:auto;font-size:10px;color:#888}
+.zouyu-folder-empty{padding:10px 12px;color:#999;text-align:center}
 `;
 
 let folderMenuStylesInjected = false;
@@ -564,59 +663,113 @@ function closeFolderMenu() {
   getFolderMenu().classList.add("hidden");
 }
 
+function positionFolderMenu(anchorBtn, node) {
+  const menu = getFolderMenu();
+  menu.classList.remove("hidden");
+  const rect = (anchorBtn?.getBoundingClientRect?.()) || node?.getBoundingClientRect?.();
+  const mh = menu.offsetHeight || 300;
+  const mw = menu.offsetWidth || 360;
+  let top = (rect?.bottom || 0) + 4;
+  if (top + mh > window.innerHeight - 8) top = Math.max(8, (rect?.top || 0) - mh - 4);
+  let left = Math.min(rect?.left || 8, window.innerWidth - mw - 8);
+  left = Math.max(8, left);
+  menu.style.top = `${Math.round(top)}px`;
+  menu.style.left = `${Math.round(left)}px`;
+}
+
 /**
- * 打开"models 文件夹"选择菜单：展示 category 根目录及其一级子文件夹，
- * 选中后写入 folder 控件并刷新文件下拉（点击位置自动定位到按钮旁）。
+ * 打开 models 目录浏览器（类似文件资源管理器）：
+ * 从 models 根目录开始，可逐级进入子文件夹、返回上一级、"🗔 资源管理器"在
+ * 操作系统中打开当前目录；"选择此文件夹"后自动识别文件夹名，写入 folder 控件、
+ * 刷新模型下拉并更新状态显示。
  */
-async function openFolderPicker(node, category, folderWidget, fileWidget, anchorBtn) {
+async function openFolderBrowser(node, category, folderWidget, fileWidget, anchorBtn) {
   ensureFolderMenuStyles();
   const menu = getFolderMenu();
-  try {
-    const d = await fetchJson(`/zouyu_model_loader/folders?category=${encodeURIComponent(category)}`);
-    const zh = (node.__zouyuLang || getLang()) !== "English";
-    const root = d.root || "";
-    menu.innerHTML = "";
-    const head = document.createElement("div");
-    head.className = "zouyu-folder-head";
-    head.textContent = (zh ? "📁 models 目录: " : "📁 models root: ") + root;
-    menu.appendChild(head);
+  const zh = (node.__zouyuLang || getLang()) !== "English";
 
-    const folders = d.folders || ["."];
-    folders.forEach((f) => {
-      const row = document.createElement("div");
-      row.className = "zouyu-folder-item";
-      const isRoot = f === ".";
-      row.innerHTML = isRoot
-        ? `<span>${zh ? "根目录" : "Root"}</span><span class="tag">${category}</span>`
-        : `<span>📂 ${f}</span><span class="tag">${category}/${f}</span>`;
-      row.onmousedown = (e) => {
-        e.preventDefault();
-        closeFolderMenu();
-        folderWidget.value = isRoot ? category : f;
-        if (typeof folderWidget.callback === "function") folderWidget.callback(folderWidget.value);
-        refreshModelFiles(category, folderWidget.value, fileWidget);
-        app.graph?.setDirtyCanvas(true, false);
+  const render = async (folderRel) => {
+    try {
+      const d = await fetchJson(
+        `/zouyu_model_loader/browse?category=${encodeURIComponent(category)}&folder=${encodeURIComponent(folderRel || "")}`
+      );
+      menu.innerHTML = "";
+
+      const head = document.createElement("div");
+      head.className = "zouyu-folder-head";
+      head.textContent = `📁 ${d.current || ""}`;
+      menu.appendChild(head);
+
+      const actions = document.createElement("div");
+      actions.className = "zouyu-folder-actions";
+      const mkBtn = (label, fn) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.textContent = label;
+        b.className = "zouyu-folder-btn";
+        b.onclick = fn;
+        actions.appendChild(b);
+        return b;
       };
-      menu.appendChild(row);
-    });
+      mkBtn(zh ? "✔ 选择此文件夹" : "✔ Select", async () => {
+        try {
+          const p = await fetchJson(
+            `/zouyu_model_loader/pick?category=${encodeURIComponent(category)}&rel=${encodeURIComponent(d.rel || "")}`
+          );
+          if (!p.ok) {
+            alert(p.error || "error");
+            return;
+          }
+          folderWidget.value = p.folder;
+          if (typeof folderWidget.callback === "function") folderWidget.callback(folderWidget.value);
+          await refreshModelFiles(category, p.folder, fileWidget);
+          closeFolderMenu();
+          refreshStatusDOM(node);
+          app.graph?.setDirtyCanvas(true, false);
+        } catch (e) {
+          alert(String(e));
+        }
+      });
+      mkBtn(`🗔 ${zh ? "资源管理器" : "Explorer"}`, async () => {
+        try {
+          await fetch(`/zouyu_model_loader/reveal?path=${encodeURIComponent(d.current || "")}`);
+        } catch (e) { /* ignore */ }
+      });
+      if (d.rel) {
+        mkBtn(`⬆ ${zh ? "上一级" : "Up"}`, () => render(d.up || ""));
+      }
+      menu.appendChild(actions);
 
-    const rect = (anchorBtn?.getBoundingClientRect?.()) || node.getBoundingClientRect?.();
-    menu.classList.remove("hidden");
-    const mh = menu.offsetHeight || 260;
-    const mw = menu.offsetWidth || 300;
-    let top = (rect?.bottom || 0) + 4;
-    if (top + mh > window.innerHeight - 8) top = Math.max(8, (rect?.top || 0) - mh - 4);
-    let left = Math.min(rect?.left || 8, window.innerWidth - mw - 8);
-    left = Math.max(8, left);
-    menu.style.top = `${Math.round(top)}px`;
-    menu.style.left = `${Math.round(left)}px`;
-  } catch (e) {
-    console.error("[ZouyuSeedTensor] 打开文件夹选择失败:", e);
-  }
+      if (!d.folders || d.folders.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "zouyu-folder-empty";
+        empty.textContent = zh ? "（无子文件夹）" : "(no subfolders)";
+        menu.appendChild(empty);
+      } else {
+        for (const f of d.folders) {
+          const row = document.createElement("div");
+          row.className = "zouyu-folder-item";
+          row.innerHTML = `<span>📂 ${f}</span><span class="tag">${f}</span>`;
+          row.onmousedown = (e) => {
+            e.preventDefault();
+            render(d.rel ? `${d.rel}/${f}` : f);
+          };
+          menu.appendChild(row);
+        }
+      }
+      positionFolderMenu(anchorBtn, node);
+    } catch (e) {
+      console.error("[ZouyuSeedTensor] 浏览文件夹失败:", e);
+    }
+  };
+
+  await render("");
 }
 
 function setupModelLoaderNode(node) {
-  loaderNodes.add(node);
+  ensureStatusStyles();
+  node.__zouyuStatus = {};
+  statusNodes.add(node);
   startStatusPolling();
 
   for (const c of LOADER_MODELS) {
@@ -624,17 +777,38 @@ function setupModelLoaderNode(node) {
     const flw = node.widgets?.find((w) => w.name === c.file);
     if (!fw || !flw) continue;
 
-    // 手动修改文件夹文本时联动刷新文件列表
+    // 状态显示块：文件夹名在上、模型名+三色状态灯在下 → 插到模型下拉之前
+    const el = makeStatusBlock();
+    const w = addDOMWidgetSafe(node, "zouyu_group_" + c.kind, el);
+    if (w) moveWidgetBefore(node, w, flw);
+    node.__zouyuStatus[c.kind] = { el, folderWidget: fw, fileWidget: flw };
+
+    // 手动修改文件夹文本时联动刷新文件列表与状态显示
     const origFolderCallback = fw.callback;
     fw.callback = function (value) {
       const r = origFolderCallback?.call(this, value);
       refreshModelFiles(c.category, value, flw);
+      refreshStatusDOM(node);
+      return r;
+    };
+    const origFileCallback = flw.callback;
+    flw.callback = function (value) {
+      const r = origFileCallback?.call(this, value);
+      refreshStatusDOM(node);
       return r;
     };
 
-    const btn = addButton(node, "📁 选文件夹", "📁 Folder", () => {
-      openFolderPicker(node, c.category, fw, flw, btn);
+    // "选择模型文件夹"按钮 → 放在模型下拉之下
+    const btn = addButton(node, "📁 选择模型文件夹", "📁 Choose Model Folder", () => {
+      openFolderBrowser(node, c.category, fw, flw, btn);
     });
+    moveWidgetAfter(node, btn, flw);
+
+    // 组与组之间空一行
+    const gapEl = document.createElement("div");
+    gapEl.className = "zouyu-group-gap";
+    const gapW = addDOMWidgetSafe(node, "zouyu_gap_" + c.kind, gapEl);
+    if (gapW) moveWidgetAfter(node, gapW, btn);
   }
 
   addButton(node, "🔄 刷新文件", "🔄 Refresh", async () => {
@@ -646,16 +820,32 @@ function setupModelLoaderNode(node) {
     app.graph?.setDirtyCanvas(true, false);
   });
 
-  // 首次创建即拉一次状态
-  (async () => {
-    try {
-      const r = await fetch("/zouyu_model_loader/status");
-      if (r.ok) {
-        const payload = await r.json();
-        setNodeBadges(node, statusBadges(payload, node.__zouyuLang || getLang()));
-      }
-    } catch (e) { /* ignore */ }
-  })();
+  refreshStatusDOM(node);
+}
+
+function setupModelGuardNode(node) {
+  ensureStatusStyles();
+  node.__zouyuStatus = {};
+  statusNodes.add(node);
+  startStatusPolling();
+
+  const pairs = [
+    ["model", "unet"],
+    ["clip", "clip"],
+    ["vae", "vae"],
+    ["audio_vae", "audio_vae"],
+  ];
+  for (const [inpName, kind] of pairs) {
+    const inp = node.inputs?.find((i) => i.name === inpName);
+    if (!inp || inp.link == null) continue; // 只为已连接的模型亮灯
+    const el = document.createElement("div");
+    el.className = "zouyu-status-block";
+    el.innerHTML = `<div class="zouyu-model-line"><span class="dot"></span><span class="zn"></span><span class="zs"></span></div>`;
+    addDOMWidgetSafe(node, "zouyu_guard_" + kind, el);
+    node.__zouyuStatus[kind] = { el, folderWidget: null, fileWidget: null };
+  }
+
+  refreshStatusDOM(node);
 }
 
 // ---------------------------------------------------------------------------
@@ -674,6 +864,7 @@ app.registerExtension({
       const r = origOnConnectionsChange?.apply(this, arguments);
       try {
         applyLanguage(this, this.__zouyuLang || getLang());
+        if (this.comfyClass === "ZouyuModelGuard") setupModelGuardNode(this);
       } catch (e) {
         console.error("[ZouyuSeedTensor] i18n refresh error:", e);
       }
@@ -683,7 +874,7 @@ app.registerExtension({
     const origOnRemoved = nodeType.prototype.onRemoved;
     nodeType.prototype.onRemoved = function () {
       const r = origOnRemoved?.apply(this, arguments);
-      loaderNodes.delete(this);
+      statusNodes.delete(this);
       return r;
     };
 
@@ -708,6 +899,10 @@ app.registerExtension({
 
         if (comfyClass === "ZouyuModelLoader") {
           setupModelLoaderNode(node);
+        }
+
+        if (comfyClass === "ZouyuModelGuard") {
+          setupModelGuardNode(node);
         }
 
         const langWidget = node.widgets?.find((w) => w.name === "language");
@@ -755,16 +950,16 @@ api.addEventListener("Zouyu-seed-files-refresh", () => {
   refreshAllFileCombos();
 });
 
-// 模型加载器执行完成后立即刷新状态灯（兜底：另有 2.5s 轮询）
+// 模型加载器/占用检测执行完成后立即刷新状态灯（兜底：另有 2.5s 轮询）
 api.addEventListener("executed", (event) => {
   try {
     const detail = event.detail;
     if (!detail || detail.nodeId == null) return;
     const node = app.graph?._nodes?.find((n) => String(n.id) === String(detail.nodeId));
-    if (!node || node.comfyClass !== "ZouyuModelLoader") return;
-    const uis = Array.isArray(detail.output) ? detail.output : [detail.output];
-    const status = uis?.find((u) => u && u.zouyu_status)?.zouyu_status;
-    if (status) setNodeBadges(node, statusBadges(status, node.__zouyuLang || getLang()));
+    if (!node) return;
+    if (node.comfyClass === "ZouyuModelLoader" || node.comfyClass === "ZouyuModelGuard") {
+      refreshStatusDOM(node);
+    }
   } catch (e) {
     /* ignore */
   }
