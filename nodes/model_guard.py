@@ -23,6 +23,7 @@ import comfy.model_management as model_management
 import comfy.utils
 import folder_paths
 from comfy_api.latest import io
+from comfy.patcher_extension import CallbacksMP
 
 # ---------------------------------------------------------------------------
 # 共享注册表（同一进程内，节点1 / 节点2 / HTTP 路由互通）
@@ -120,6 +121,51 @@ def register(kind, name, obj, model_type=""):
             "ts": _now(),
         }
         _REGISTRY["loader_ts"] = _now()
+    _attach_model_callbacks(patcher, kind)
+
+
+def _attach_model_callbacks(patcher, kind):
+    """在模型 patcher 上挂载状态回调（幂等）：
+    - ON_LOAD ：模型被加载/使用 → 记录"曾被使用"并实时更新状态（绿）。
+    - ON_DETACH：模型被官方模型管理卸载（其它模型需要显存时）→ 低显存模式下
+      立即释放其 CPU 内存（DynamicVRAM 模型）+ 实时更新状态（红/蓝）。
+      该机制与 guard 节点摆放位置无关，保证"工作模型运行时其它模型被自动卸载"。
+    """
+    try:
+        if getattr(patcher, "__zouyu_hooked", False):
+            return
+        patcher.__zouyu_hooked = True
+        patcher.add_callback(CallbacksMP.ON_LOAD, lambda p, *a, **k: _on_model_load(kind, p))
+        patcher.add_callback(CallbacksMP.ON_DETACH, lambda p, *a, **k: _on_model_detach(kind, p))
+    except Exception:
+        pass
+
+
+def _on_model_load(kind, patcher):
+    with _LOCK:
+        e = _REGISTRY["models"].get(kind)
+        if e is not None and e["patcher"] is patcher:
+            e["ever_loaded"] = True
+            e["state"] = "gpu"
+            e["ts"] = _now()
+
+
+def _on_model_detach(kind, patcher):
+    if not get_switch():
+        return
+    freed = 0
+    try:
+        if patcher.is_dynamic():
+            freed = int(patcher.partially_unload_ram(1e32) or 0)
+    except Exception:
+        freed = 0
+    with _LOCK:
+        e = _REGISTRY["models"].get(kind)
+        if e is not None and e["patcher"] is patcher:
+            e["state"] = residency(patcher)
+            e["ts"] = _now()
+    if freed > 0:
+        log_event("[{}] 空闲即卸载：已释放 CPU 内存".format(KIND_LABELS.get(kind, kind)))
 
 
 def watch(kind, patcher):
@@ -140,7 +186,8 @@ def watch(kind, patcher):
         if kind in _REGISTRY["models"] and _REGISTRY["models"][kind]["patcher"] is patcher:
             _REGISTRY["models"][kind]["state"] = residency(patcher)
             _REGISTRY["models"][kind]["ts"] = _now()
-        return ever_loaded
+    _attach_model_callbacks(patcher, kind)
+    return ever_loaded
 
 
 def record_signal(kind, state):
@@ -176,15 +223,18 @@ def fully_unload_patcher(patcher):
     return freed_ram
 
 
-def evaluate_idle(kind, patcher, zh):
+def evaluate_idle(kind, patcher, zh, has_trigger=False):
     """节点2 的核心判定：模型此刻是否空闲 → 按开关决定动作。
 
     返回 (说明文本, 动作后状态, action)，action ∈ {"none", "official", "unload"}。
-    - 开关关闭：只记录闲置信号，交给官方管理（状态会由官方卸载变为 cpu/蓝色）。
-    - 开关开启：
-      - 模型在显存（gpu）：说明已被调用过且本节点之后不再使用 → 彻底卸载（显存+内存）。
-      - 模型在 CPU 缓存（cpu）：动态模型继续释放 CPU 内存；传统模型仅提示无法释放。
-      - 完全卸载（free）/从未加载：无需处理。
+    判定条件：
+    - 开关关闭：只记录闲置信号，交给官方管理（卸载到 CPU，状态→蓝色）。
+    - 开关开启 + 有 trigger（阶段边界，本节点之后不再使用该模型）：
+      - 模型在显存（gpu）→ 彻底卸载（显存+CPU内存，状态→红色）；
+      - 模型在 CPU 缓存（cpu）→ 动态模型继续释放 CPU 内存；
+      - 完全卸载（free）/从未加载 → 无需处理。
+    - 开关开启 + 无 trigger（纯监测透传）：不动显存中的模型（可能即将被使用），
+      只对已在 CPU 缓存的动态模型释放内存、并记录状态。
     """
     switch = get_switch()
     st = residency(patcher)
@@ -193,6 +243,8 @@ def evaluate_idle(kind, patcher, zh):
     label = KIND_LABELS.get(kind, kind)
     if not switch:
         return ("[{}] 空闲，开关关闭：交由官方管理自动卸载到CPU内存".format(label), st, "official")
+    if st == "gpu" and not has_trigger:
+        return ("[{}] 在显存中（可能即将被使用），未触发卸载，仅记录状态".format(label), st, "none")
     if st == "gpu":
         freed_ram = fully_unload_patcher(patcher)
         st2 = residency(patcher)
@@ -501,17 +553,18 @@ class ZouyuModelGuard(io.ComfyNode):
     def execute(cls, model=None, clip=None, vae=None, audio_vae=None, trigger=None,
                 language="中文") -> io.NodeOutput:
         zh = (language != "English")
+        has_trigger = trigger is not None
         lines = []
         for kind, obj in (("unet", model), ("clip", clip), ("vae", vae), ("audio_vae", audio_vae)):
             if obj is None:
                 continue
             patcher = _patcher_of(obj)
-            msg, _st, _action = evaluate_idle(kind, patcher, zh)
+            msg, _st, _action = evaluate_idle(kind, patcher, zh, has_trigger=has_trigger)
             log_event(msg)
             lines.append(msg)
-        if trigger is not None and lines:
-            lines.insert(0, ("触发已就绪：编码阶段完成，执行空闲卸载策略" if zh
-                             else "trigger ready: encode phase done, applying idle policy"))
+        if has_trigger and lines:
+            lines.insert(0, ("触发已就绪：当前阶段结束，执行空闲卸载策略" if zh
+                             else "trigger ready: phase done, applying idle policy"))
         text = "\n".join(lines) if lines else (
             "（未连接任何模型，仅透传）" if zh else "(no model connected, pass-through only)")
         return io.NodeOutput(model, clip, vae, audio_vae, text, ui={"text": [text]})
