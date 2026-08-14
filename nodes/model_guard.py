@@ -20,6 +20,7 @@ import time
 import threading
 
 import comfy.model_management as model_management
+import comfy.utils
 import folder_paths
 from comfy_api.latest import io
 
@@ -51,6 +52,15 @@ STATE_INFO = {
     "cpu":     {"zh": "CPU缓存",     "en": "CPU cached",   "color": "#2196f3"},
     "free":    {"zh": "未加载",      "en": "Not loaded",   "color": "#f44336"},
     "unknown": {"zh": "未知",        "en": "Unknown",      "color": "#9e9e9e"},
+}
+
+MODEL_TYPE_INFO = {
+    "unet":       {"zh": "主模型(Diffusion)",  "en": "Main (Diffusion)",  "color": "#b0722a"},
+    "checkpoint": {"zh": "主模型(Checkpoint)", "en": "Main (Checkpoint)", "color": "#b0722a"},
+    "clip":       {"zh": "文本模型(CLIP)",     "en": "Text (CLIP)",       "color": "#8f6f2f"},
+    "vae":        {"zh": "VAE 模型",           "en": "VAE",               "color": "#2f6b8f"},
+    "lora":       {"zh": "LoRA",               "en": "LoRA",              "color": "#7a4fa0"},
+    "unknown":    {"zh": "未知",               "en": "Unknown",           "color": "#9e9e9e"},
 }
 
 
@@ -96,7 +106,7 @@ def residency(patcher):
         return "unknown"
 
 
-def register(kind, name, obj):
+def register(kind, name, obj, model_type=""):
     """节点1 每次执行后登记四个模型（同 kind 旧条目被替换，旧 patcher 交由 GC 回收）"""
     with _LOCK:
         patcher = _patcher_of(obj)
@@ -105,6 +115,7 @@ def register(kind, name, obj):
             "name": name,
             "obj": obj,
             "patcher": patcher,
+            "model_type": model_type,
             "state": residency(patcher),
             "ts": _now(),
         }
@@ -190,6 +201,8 @@ def status_payload():
         for kind, e in _REGISTRY["models"].items():
             st = residency(e["patcher"])
             info = STATE_INFO.get(st, STATE_INFO["unknown"])
+            mtype = e.get("model_type", "")
+            tinfo = MODEL_TYPE_INFO.get(mtype, MODEL_TYPE_INFO["unknown"]) if mtype else None
             models.append({
                 "kind": kind,
                 "label": KIND_LABELS.get(kind, kind),
@@ -198,19 +211,23 @@ def status_payload():
                 "color": info["color"],
                 "zh": info["zh"],
                 "en": info["en"],
+                "type": mtype,
+                "type_zh": tinfo["zh"] if tinfo else "",
+                "type_en": tinfo["en"] if tinfo else "",
                 "ts": e.get("ts", 0.0),
             })
         return {
             "switch": _REGISTRY["switch"],
             "switch_ts": _REGISTRY["switch_ts"],
             "loader_ts": _REGISTRY["loader_ts"],
+            "models_root": _models_root(),
             "models": models,
             "events": list(_REGISTRY["events"][-15:]),
         }
 
 
 # ---------------------------------------------------------------------------
-# 文件夹 / 文件列表（前端"选择模型文件夹"用）
+# 自由文件夹解析 + 模型类型自动识别（前端"选择模型文件夹"用）
 # ---------------------------------------------------------------------------
 
 def _models_root():
@@ -231,60 +248,147 @@ def _safe_join(base, rel):
     return target
 
 
-def browse_dir(category, folder):
-    """浏览 models 目录：folder 为相对 models 根的空/相对路径（"" = models 根）。
-    返回当前目录绝对路径、一级子文件夹、上级目录相对路径。"""
-    models_root = _models_root()
-    rel = (folder or "").strip().strip("/\\")
-    current = _safe_join(models_root, rel)
-    folders = []
+def _safe_join_soft(base, rel):
     try:
-        for d in sorted(os.listdir(current)):
-            if os.path.isdir(os.path.join(current, d)):
-                folders.append(d)
-    except OSError:
-        pass
-    up = "/".join(rel.split("/")[:-1]) if rel else ""
-    return {
-        "category": category,
-        "models_root": models_root,
-        "current": current,
-        "rel": rel,
-        "up": up,
-        "folders": folders,
-    }
-
-
-def pick_category_rel(category, rel_from_models):
-    """把 models 根下的相对路径换算为该分类根下的相对路径。
-    选中分类根目录本身返回分类名；不在分类搜索目录内返回 None。"""
-    try:
-        abs_target = _safe_join(_models_root(), rel_from_models)
+        return _safe_join(base, rel)
     except ValueError:
         return None
-    for root in folder_paths.get_folder_paths(category):
-        root_abs = os.path.abspath(root)
-        try:
-            r = os.path.relpath(abs_target, root_abs)
-        except ValueError:
-            continue
-        if r == ".":
-            return category
-        if not r.startswith(".."):
-            return r.replace("\\", "/")
-    return None
+
+
+def _read_keys(path):
+    """读取权重文件的键名列表（safetensors 只读元数据，很快；其余格式全量加载）。"""
+    try:
+        ext = os.path.splitext(path)[1].lower()
+        if ext == ".safetensors":
+            from safetensors import safe_open
+            with safe_open(path, framework="pt") as f:
+                return list(f.keys())
+        sd = comfy.utils.load_torch_file(path)
+        return list(sd.keys())
+    except Exception:
+        return None
+
+
+_VAE_MARKERS = (
+    "decoder.conv_in", "decoder.conv_out", "decoder.conv_post", "decoder.mid_block",
+    "decoder.up_blocks", "decoder.norm_out", "decoder.proj_out", "decoder.mask_token",
+    "decoder.register_tokens", "dec_in_proj", "enc_in_proj", "latents_mean",
+    "latents_std", "first_stage_model.decoder",
+)
+
+
+def detect_model_type(abs_path):
+    """根据权重键名识别模型类型：unet / checkpoint / clip / vae / lora / unknown。"""
+    keys = _read_keys(abs_path)
+    if not keys:
+        return "unknown"
+    joined = "|".join(keys)
+    if any(k.startswith(("lora_unet.", "lora_te.")) for k in keys) \
+            or ".lora_down." in joined or ".lora_up." in joined:
+        return "lora"
+    if "decoder." in joined and "encoder." in joined \
+            and any(m in joined for m in _VAE_MARKERS):
+        return "vae"
+    if any(k.startswith("model.embed_tokens") for k in keys) \
+            or "text_model.encoder" in joined \
+            or "cond_stage_model." in joined \
+            or ("visual." in joined and any(k.startswith("model.layers.") for k in keys)) \
+            or ("shared.weight" in joined and "encoder.block." in joined):
+        return "clip"
+    if any(k.startswith("blocks.") for k in keys) \
+            or "model.diffusion_model." in joined \
+            or "diffusion_model." in joined \
+            or "adaln_" in joined \
+            or "patch_proj" in joined \
+            or "pos_embed" in joined:
+        return "checkpoint" if "cond_stage_model." in joined else "unet"
+    return "unknown"
+
+
+def _find_in_models(filename):
+    """在整个 models 目录树里按文件名搜索，返回绝对路径列表。"""
+    results = []
+    seen = set()
+    models_root = _models_root()
+    if not models_root:
+        return results
+    for dirpath, dirnames, filenames in os.walk(models_root):
+        if filename in filenames:
+            p = os.path.join(dirpath, filename)
+            if p not in seen:
+                seen.add(p)
+                results.append(p)
+    return results
+
+
+def _resolve_abs(slot_category, folder, name):
+    """自由文件夹解析：folder 可为分类名/空/"."（=该槽位默认分类根），
+    或任意相对 models 根的路径。按 basename 兜底全 models 搜索，
+    兼容用户旧工作流中文件夹与文件不匹配的情况。"""
+    name = str(name or "").strip().strip("/\\")
+    if not name or name == "(无文件)":
+        raise ValueError("[ZouyuModelLoader] 未选择模型文件")
+    folder = str(folder or "").strip().strip("/\\")
+    models_root = _models_root()
+    candidates = []
+    if folder in ("", ".", slot_category):
+        for root in folder_paths.get_folder_paths(slot_category):
+            candidates.append(os.path.join(root, name.replace("/", os.sep)))
+            candidates.append(os.path.join(root, os.path.basename(name)))
+    else:
+        candidates.append(_safe_join_soft(models_root, folder + "/" + name))
+        candidates.append(_safe_join_soft(models_root, folder + "/" + os.path.basename(name)))
+    # 文件夹可能写错：兜底在槽位默认分类根下按文件名找
+    for root in folder_paths.get_folder_paths(slot_category):
+        candidates.append(os.path.join(root, os.path.basename(name)))
+    for c in candidates:
+        if c and os.path.isfile(c):
+            return c
+    found = _find_in_models(os.path.basename(name))
+    if len(found) == 1:
+        return found[0]
+    if len(found) > 1:
+        raise ValueError("[ZouyuModelLoader] 多个目录存在同名文件: {}，请在文件夹中精确定位".format(os.path.basename(name)))
+    raise ValueError("[ZouyuModelLoader] 找不到模型文件: {}（文件夹: {}）".format(name, folder or slot_category))
 
 
 def list_files(category, folder):
-    """列出分类根目录（folder 为分类名/空/"."）或某子文件夹下的模型文件。"""
-    allowed = folder_paths.get_filename_list(category)
-    folder = (folder or "").strip().strip("/\\")
+    """列出模型文件：folder 为分类名/空/"." 时返回分类根全部文件；
+    否则返回 models_root/folder 目录下的模型文件（相对该目录的路径）。"""
     if folder in ("", ".", category):
-        out = [f for f in allowed if "/" not in f and "\\" not in f]
-    else:
-        prefix = folder.replace("\\", "/").rstrip("/") + "/"
-        out = [f for f in allowed if f.replace("\\", "/").startswith(prefix)]
-    return {"category": category, "folder": folder or ".", "files": out}
+        return {"folder": folder or ".", "files": folder_paths.get_filename_list(category)}
+    models_root = _models_root()
+    base = _safe_join_soft(models_root, folder)
+    if base is None or not os.path.isdir(base):
+        return {"folder": folder, "files": []}
+    files = []
+    for dirpath, _dirnames, filenames in os.walk(base):
+        for fn in filenames:
+            if os.path.splitext(fn)[1].lower() in folder_paths.supported_pt_extensions:
+                files.append(os.path.relpath(os.path.join(dirpath, fn), base).replace("\\", "/"))
+    return {"folder": folder, "files": sorted(files)}
+
+
+def find_folder(name):
+    """在 models 目录树中按文件夹名查找（限深 5 层），返回相对 models 根的路径列表。"""
+    name = (name or "").strip()
+    if not name:
+        return {"found": []}
+    models_root = _models_root()
+    hits = []
+    for dirpath, dirnames, _filenames in os.walk(models_root):
+        rel = os.path.relpath(dirpath, models_root)
+        depth = 0 if rel == "." else rel.count(os.sep) + 1
+        if depth > 5:
+            dirnames[:] = []
+            continue
+        if name in dirnames:
+            rel_hit = os.path.relpath(os.path.join(dirpath, name), models_root).replace("\\", "/")
+            if rel_hit not in hits:
+                hits.append(rel_hit)
+        if len(hits) >= 20:
+            break
+    return {"found": hits}
 
 
 def reveal_path(path):
@@ -322,20 +426,9 @@ def register_routes():
             request.query.get("category", "diffusion_models"),
             request.query.get("folder", ".")))
 
-    @routes.get("/zouyu_model_loader/browse")
-    async def _browse(request):
-        return web.json_response(browse_dir(
-            request.query.get("category", "diffusion_models"),
-            request.query.get("folder", "")))
-
-    @routes.get("/zouyu_model_loader/pick")
-    async def _pick(request):
-        folder = pick_category_rel(
-            request.query.get("category", "diffusion_models"),
-            request.query.get("rel", ""))
-        if folder is None:
-            return web.json_response({"ok": False, "error": "所选文件夹不在该模型分类的搜索目录内"})
-        return web.json_response({"ok": True, "folder": folder})
+    @routes.get("/zouyu_model_loader/find_folder")
+    async def _find_folder(request):
+        return web.json_response(find_folder(request.query.get("name", "")))
 
     @routes.get("/zouyu_model_loader/reveal")
     async def _reveal(request):
