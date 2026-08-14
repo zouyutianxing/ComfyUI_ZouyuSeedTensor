@@ -32,6 +32,7 @@ from .model_guard import (
     _resolve_abs,
     detect_model_type,
     _read_keys,
+    all_model_files,
 )
 
 MAX_MODELS = 8
@@ -67,21 +68,6 @@ TYPE_CATEGORY = {
     "lora": "loras",
     "other": "diffusion_models",
 }
-
-
-def _all_model_files():
-    """全部模型分类下的文件合并列表（供 schema 下拉选项；后端校验通过的前提）。
-    首项固定为占位符 "(未选择)"，保证未使用的槽位也能通过后端校验。"""
-    cats = ["diffusion_models", "text_encoders", "vae", "loras", "checkpoints",
-            "clip_vision", "style_models", "upscale_models", "controlnet", "gligen"]
-    files, seen = [], set()
-    for c in cats:
-        for f in folder_paths.get_filename_list(c):
-            if f not in seen:
-                seen.add(f)
-                files.append(f)
-    files.insert(0, "(未选择)")
-    return files
 
 
 def _file_options(category):
@@ -188,21 +174,22 @@ class ZouyuModelLoader(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         inputs = []
-        _all_files = _all_model_files()
+        _all_files = all_model_files()
         for i in range(MAX_MODELS):
             inputs.extend([
                 io.Combo.Input("model_{}_type".format(i), options=MODEL_TYPE_OPTIONS, default="未使用",
                                optional=True, tooltip="模型类型（未使用=该槽位空置）"),
                 io.String.Input("model_{}_folder".format(i), default="", optional=True,
                                 tooltip="模型文件夹（相对 models 目录，可留空=按类型默认）"),
-                # 文件下拉选项 = 全模型合并列表：前端按类型/文件夹过滤显示，
-                # 后端校验对任何真实文件都能通过（官方加载器同为导入期列表）
+                # 文件下拉选项 = 全模型合并列表（官方分类 + models 下自定义文件夹）；
+                # 前端按类型/文件夹过滤显示，后端校验对任何真实文件都能通过，
+                # 拖入导入的新文件数秒内即可被校验接受（无需重启）
                 io.Combo.Input("model_{}_name".format(i), options=_all_files, default="(未选择)",
                                optional=True, tooltip="模型文件"),
             ])
         inputs.extend([
             io.Boolean.Input("compact_mode", default=False, label_on="集成", label_off="展开",
-                             optional=True, tooltip="集成模式：只显示各模型下拉、状态灯、输出端口与语言/低显存开关"),
+                             optional=True, tooltip="集成模式：不显示模型类型/文件夹，只显示模型文件列（含三色状态灯与对应输出端口，类型显示在端口旁）"),
             io.Boolean.Input("low_vram_mode", default=False, label_on="彻底卸载", label_off="CPU缓存",
                              optional=True, tooltip="开启=极低显存：模型空闲时从显存+CPU内存彻底卸载；关闭=官方管理卸载到CPU内存"),
             io.Combo.Input("language", options=["中文", "English"], default="中文", optional=True),
@@ -215,8 +202,10 @@ class ZouyuModelLoader(io.ComfyNode):
             description=(
                 "通用模型加载器：先选模型类型（主模型/文本模型/视频VAE/音频VAE/LoRA/其他），再选文件；"
                 "自动适配对应加载器并识别文件真实类型（自动纠错，不报错）。动态 UI：填好一个模型自动"
-                "出现下一个；每个模型一个输出端口（按类型编号：主模型0/lora0/...）；三色状态灯在端口旁。"
-                "『集成模式』只保留下拉+端口+语言/低显存开关。低显存模式下闲置模型自动从显存+CPU内存卸载。"
+                "出现下一个；每个模型的输出端口与下拉平行（位于最右），端口旁是三色状态灯；端口按类型"
+                "编号（主模型0/lora0/...）。『集成模式』只显示模型文件列+状态灯+端口（类型显示在端口旁，"
+                "未选类型时自动识别）。支持把文件夹直接拖入节点导入模型（models 下同名文件夹复用/新建）。"
+                "低显存模式下闲置模型自动从显存+CPU内存卸载。"
             ),
             inputs=inputs,
             outputs=outputs,
@@ -236,7 +225,10 @@ class ZouyuModelLoader(io.ComfyNode):
         for i in range(MAX_MODELS):
             t = kwargs.get("model_{}_type".format(i)) or "未使用"
             name = kwargs.get("model_{}_name".format(i)) or ""
-            if t != "未使用" and name and name != "(未选择)":
+            # 集成模式：只选文件不选类型时自动识别（按"其他"处理）
+            if name and name != "(未选择)":
+                if t == "未使用":
+                    t = "其他"
                 folder = kwargs.get("model_{}_folder".format(i)) or ""
                 slots.append((i, t, folder, name))
 

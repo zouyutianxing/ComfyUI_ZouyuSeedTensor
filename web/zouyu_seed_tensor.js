@@ -570,7 +570,11 @@ async function refreshStatusDOM(node) {
       const m = byKind[kind];
       const st = STATE_INFO[m?.state || "unknown"];
       if (info.dotOnly) {
-        if (info.el) info.el.querySelector(".dot").style.background = st.color;
+        // 行尾三色灯：info.el 即灯元素本身；info.tag 为类型标签（集成模式）
+        if (info.el) info.el.style.background = st.color;
+        if (info.tag && m?.type) {
+          info.tag.textContent = zh ? m.type_zh : m.type_en;
+        }
         continue;
       }
       const fname = info.fileWidget ? String(info.fileWidget.value || "").split(/[\\/]/).pop() : "";
@@ -594,38 +598,50 @@ function startStatusPolling() {
 }
 
 // ===========================================================================
-// 动态模型加载器（schema 原生控件 + widget.hidden 显隐，兼容新前端）
-// 说明：不替换 node.widgets、不自定义创建 combo/string/toggle，
-// 全部使用后端 schema 原生控件（type/folder/name 下拉与输入），
-// 通过 hidden + computeLayoutSize 控制显隐（rgthree 同款机制）。
+// 动态模型加载器（Vue 前端：schema 原生控件 + options.hidden 显隐 + 行内端口/状态灯）
+// 说明：
+// - 显隐：同时设置 w.hidden 与 w.options.hidden（Vue 网格按 options.hidden 判显隐）
+// - 行布局：每个可见槽位一行 [类型][文件夹][文件下拉]，行尾叠加 状态灯+类型标签+📁
+// - 端口：原生输出端口点用 CSS transform 平移到对应下拉行（与下拉平行、位于最右）
+// - 三色灯：直接挂载在节点 DOM 内，随节点移动/缩放自动定位
+// - 拖入文件夹：node.onDragOver/onDragDrop → 上传到 models/<同名文件夹>（同名复用/新建）
+// - 节点尺寸随可见行数自动收缩/伸长（DOM 网格驱动，隐藏控件不占行）
 // ===========================================================================
+
+const ZOUYU_OVERLAY_STYLE = `
+.zouyu-loader-node .lg-slot--output{height:0 !important;margin:0 !important;padding:0 !important;overflow:visible !important}
+.zouyu-loader-node .lg-slot--output [data-slot-key]{position:relative;z-index:22;cursor:crosshair}
+.zouyu-loader-overlay{position:absolute;inset:0;pointer-events:none;z-index:10}
+.zouyu-row-tail{position:absolute;right:20px;display:flex;align-items:center;gap:6px;pointer-events:none;transform:translateY(-50%)}
+.zouyu-rt-light{width:12px;height:12px;border-radius:50%;border:1px solid rgba(0,0,0,.45);box-shadow:0 0 4px rgba(0,0,0,.5);display:inline-block;background:#9e9e9e}
+.zouyu-rt-type{font-size:10px;line-height:14px;color:#c9a05f;background:rgba(0,0,0,.4);padding:0 4px;border-radius:3px;white-space:nowrap}
+.zouyu-rt-folder{font-size:11px;line-height:15px;border:none;background:rgba(0,0,0,.4);border-radius:3px;padding:0 4px;color:#ddd;cursor:pointer;pointer-events:auto}
+.zouyu-rt-folder:hover{background:rgba(0,0,0,.6)}
+.zouyu-import-bar{position:absolute;left:8px;right:8px;bottom:3px;height:16px;font-size:10px;line-height:16px;text-align:center;color:#9a9a9a;background:rgba(0,0,0,.28);border-radius:3px;cursor:pointer;pointer-events:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.zouyu-import-bar:hover{background:rgba(0,0,0,.45)}
+.zouyu-import-bar.dragover{background:rgba(76,175,80,.4);color:#fff}
+`;
+
+let zouyuOverlayStyleInjected = false;
+
+function ensureLoaderOverlayStyle() {
+  if (zouyuOverlayStyleInjected) return;
+  zouyuOverlayStyleInjected = true;
+  const el = document.createElement("style");
+  el.textContent = ZOUYU_OVERLAY_STYLE;
+  document.head.appendChild(el);
+}
 
 function setWidgetHidden(w, hidden) {
   if (!w) return;
   w.hidden = !!hidden;
+  if (!w.options) w.options = {};
+  w.options.hidden = !!hidden;
   if (hidden) {
     w.computeLayoutSize = () => ({ minHeight: 0, minWidth: 0, maxHeight: 0, maxWidth: 0 });
   } else {
     w.computeLayoutSize = undefined;
   }
-}
-
-function moveWidgetAfter(node, widget, afterWidget) {
-  if (!widget || !afterWidget) return;
-  const arr = node.widgets;
-  const wIdx = arr.indexOf(widget);
-  const aIdx = arr.indexOf(afterWidget);
-  if (wIdx < 0 || aIdx < 0) return;
-  arr.splice(wIdx, 1);
-  arr.splice(arr.indexOf(afterWidget) + 1, 0, widget);
-}
-
-function makeSlotDot(i) {
-  const el = document.createElement("div");
-  el.className = "zouyu-slot-dot";
-  el.innerHTML = '<span class="dot"></span>';
-  el.title = "绿=已加载(GPU) 蓝=CPU缓存 红=未加载";
-  return el;
 }
 
 function slotWidgets(node, i) {
@@ -641,12 +657,16 @@ function visibleSlotCount(st) {
   let lastFilled = -1;
   for (let i = 0; i < MAX_MODELS; i++) {
     const s = st.slots[i];
-    if (s && s.type && s.type !== "未使用" && s.name && s.name !== "(未选择)") lastFilled = i;
+    if (!s) continue;
+    const filled = !!s.name && s.name !== "(未选择)" && s.name !== "(无文件)";
+    const typeSet = !!s.type && s.type !== "未使用";
+    // 集成模式：只填文件也算已用（类型由后端自动识别）
+    if (filled && (typeSet || st.compact)) lastFilled = i;
   }
   return Math.min(Math.max(lastFilled + 2, 1), MAX_MODELS);
 }
 
-/** 刷新某槽位文件下拉的选项（按类型+文件夹过滤显示）。 */
+/** 刷新某槽位文件下拉选项（按类型+文件夹过滤显示；Vue 组合框读 widget.options.values）。 */
 async function refreshSlotFileOptions(node, i) {
   const st = node.__zouyuSlotState;
   const s = st && st.slots[i];
@@ -674,56 +694,353 @@ async function refreshSlotFileOptions(node, i) {
   app.graph?.setDirtyCanvas(true, false);
 }
 
-/** 为某槽位确保/移除额外控件（状态灯、选文件夹、移除按钮）。 */
-function ensureSlotExtras(node, i, visible, used, compact) {
+function _cssEsc(v) {
+  if (typeof CSS !== "undefined" && CSS.escape) return CSS.escape(String(v));
+  return String(v).replace(/[^a-zA-Z0-9_-]/g, (c) => "\\" + c);
+}
+
+/** 节点根 DOM 元素（Vue 渲染，[data-node-id]）。 */
+function nodeEl(node) {
+  if (!node || node.id == null) return null;
+  return document.querySelector(`.lg-node[data-node-id="${_cssEsc(node.id)}"]`) || null;
+}
+
+/** 按 data-slot-key 后缀找槽位点元素（nodeId 可能是数字或字符串）。 */
+function findSlotEl(rootEl, suffix) {
+  const all = rootEl.querySelectorAll("[data-slot-key]");
+  for (const el of all) {
+    const k = el.dataset?.slotKey || "";
+    if (k.endsWith(suffix)) return el;
+  }
+  return null;
+}
+
+/** 测量单个可见控件行的高度（Vue 网格行）。 */
+function measureRowHeight(node) {
+  const el = nodeEl(node);
+  const row = el?.querySelector('[data-testid="node-widget"]');
+  return row ? row.getBoundingClientRect().height : 0;
+}
+
+/** 槽位 i 的名字控件在可见控件网格中的行序号（估算兜底用）。 */
+function visibleRowIndex(node, i) {
   const st = node.__zouyuSlotState;
-  const ex = (node.__zouyuExtras = node.__zouyuExtras || {});
-  const slotEx = (ex[i] = ex[i] || {});
-  const removeExtra = (key) => {
-    const w = slotEx[key];
-    if (w) {
-      const idx = node.widgets.indexOf(w);
-      if (idx >= 0) node.widgets.splice(idx, 1);
-      slotEx[key] = undefined;
+  if (!st) return i;
+  const count = visibleSlotCount(st);
+  const compact = !!st.compact;
+  let idx = 0;
+  for (let j = 0; j < i; j++) {
+    const s = st.slots[j];
+    const vis = j < count;
+    if (!vis) continue;
+    const used = s && s.type !== "未使用";
+    if (compact) {
+      idx += 1;
+    } else {
+      idx += used ? 3 : 1;
     }
-  };
+  }
+  return idx;
+}
+
+/** 行尾叠加：状态灯 + 类型标签(集成模式) + 📁(常规模式)。 */
+function updateRowTail(node, overlay, i, rowCY, visible, used, compact, zh) {
+  let tail = overlay.querySelector(`[data-zouyu-tail="${i}"]`);
   if (!visible || !used) {
-    removeExtra("dot");
-    removeExtra("folderBtn");
-    removeExtra("removeBtn");
+    if (tail) tail.remove();
     if (node.__zouyuStatus) delete node.__zouyuStatus[`slot${i}`];
     return;
   }
+  if (!tail) {
+    tail = document.createElement("div");
+    tail.className = "zouyu-row-tail";
+    tail.setAttribute("data-zouyu-tail", String(i));
+    overlay.appendChild(tail);
+    tail.addEventListener("pointerdown", (e) => e.stopPropagation());
+  }
+  tail.style.top = (rowCY != null ? rowCY : 12) + "px";
+  tail.innerHTML = "";
+  const s = node.__zouyuSlotState.slots[i];
+  let tag = null;
+  if (compact && s) {
+    // 集成模式：类型只显示在端口旁（未选类型时显示"自动"，执行后刷新为识别结果）
+    tag = document.createElement("span");
+    tag.className = "zouyu-rt-type";
+    tag.textContent = s.type === "未使用"
+      ? (zh ? "自动" : "Auto")
+      : (zh ? s.type : (TYPE_PORT_NAMES_EN[TYPE_KEYS[s.type]] || s.type));
+    tail.appendChild(tag);
+  } else {
+    const btn = document.createElement("button");
+    btn.className = "zouyu-rt-folder";
+    btn.textContent = "📁";
+    btn.title = zh ? "选择模型文件夹" : "Choose model folder";
+    btn.addEventListener("click", (e) => { e.stopPropagation(); pickSlotFolder(node, i); });
+    tail.appendChild(btn);
+  }
+  const light = document.createElement("span");
+  light.className = "zouyu-rt-light";
+  light.title = zh ? "绿=已加载(GPU) 蓝=CPU缓存 红=未加载" : "Green=GPU Blue=CPU Red=Not loaded";
+  tail.appendChild(light);
+  if (node.__zouyuStatus) node.__zouyuStatus[`slot${i}`] = { el: light, tag, dotOnly: true };
+}
+
+/** 布局一次：端口点平移到下拉行 + 行尾灯/标签/📁 定位（节点 DOM 内，自动跟随节点）。 */
+function layoutLoaderOverlay(node) {
+  const el = nodeEl(node);
+  const st = node.__zouyuSlotState;
+  if (!el || !st) return;
+  el.classList.add("zouyu-loader-node");
+  let overlay = el.querySelector(".zouyu-loader-overlay");
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.className = "zouyu-loader-overlay";
+    overlay.setAttribute("data-zouyu-overlay", "1");
+    el.appendChild(overlay);
+    const bar = document.createElement("div");
+    bar.className = "zouyu-import-bar";
+    bar.setAttribute("data-zouyu-import", "1");
+    bar.dataset.text = zhText(node, "📥 拖入文件夹导入模型（或点击选择）", "📥 Drop folder to import models (or click)");
+    bar.textContent = bar.dataset.text;
+    overlay.appendChild(bar);
+    bar.addEventListener("click", () => pickAndImportFolder(node));
+    bar.addEventListener("dragover", (e) => { e.preventDefault(); bar.classList.add("dragover"); });
+    bar.addEventListener("dragleave", () => bar.classList.remove("dragover"));
+    bar.addEventListener("drop", (e) => { e.preventDefault(); bar.classList.remove("dragover"); });
+  }
+  const nodeRect = el.getBoundingClientRect();
+  const count = visibleSlotCount(st);
+  const compact = !!st.compact;
   const zh = st.lang !== "English";
-  // 状态灯（端口旁）
-  if (!slotEx.dot) {
-    const el = makeSlotDot(i);
-    addDOMWidgetSafe(node, `zouyu_slot_dot_${i}`, el);
-    slotEx.dot = node.widgets.find((w) => w.name === `zouyu_slot_dot_${i}`);
-    node.__zouyuStatus[`slot${i}`] = { el, dotOnly: true };
-    const nameW = slotWidgets(node, i).name;
-    if (nameW && slotEx.dot) moveWidgetAfter(node, slotEx.dot, nameW);
+  const rowH = measureRowHeight(node);
+  for (let i = 0; i < MAX_MODELS; i++) {
+    const visible = i < count;
+    const s = st.slots[i];
+    const used = visible && !!s && s.type !== "未使用";
+    // 行锚点：该行名字控件的输入端口点
+    const anchor = findSlotEl(el, `-in-${3 * i + 2}`);
+    let rowCY = null;
+    if (anchor) {
+      const r = anchor.getBoundingClientRect();
+      rowCY = r.top + r.height / 2 - nodeRect.top;
+    } else if (rowH) {
+      rowCY = (visibleRowIndex(node, i) + 0.5) * rowH;
+    }
+    // 输出端口点：可见槽位平移到该行（与下拉平行、最右）；隐藏槽位隐藏端口
+    const outDot = findSlotEl(el, `-out-${i}`);
+    if (outDot) {
+      if (!visible) {
+        outDot.style.opacity = "0";
+        outDot.style.pointerEvents = "none";
+      } else {
+        outDot.style.opacity = "";
+        outDot.style.pointerEvents = "";
+        if (rowCY != null) {
+          const dr = outDot.getBoundingClientRect();
+          const curCY = dr.top + dr.height / 2 - nodeRect.top;
+          const dy = rowCY - curCY;
+          if (Math.abs(dy) > 0.5) outDot.style.transform = `translateY(${dy.toFixed(1)}px)`;
+        }
+      }
+    }
+    updateRowTail(node, overlay, i, rowCY, visible, used, compact, zh);
   }
-  // 选文件夹按钮
-  if (!slotEx.folderBtn) {
-    slotEx.folderBtn = addButton(node, "📁", "📁", () => pickSlotFolder(node, i));
-    slotEx.folderBtn.__zouyuSlotExtra = true;
-    const nameW = slotWidgets(node, i).name;
-    if (nameW && slotEx.folderBtn) moveWidgetAfter(node, slotEx.folderBtn, nameW);
-  }
-  setWidgetHidden(slotEx.folderBtn, compact);
-  // 移除按钮（非首个槽位）
-  if (!slotEx.removeBtn && i > 0) {
-    slotEx.removeBtn = addButton(node, "−", "−", () => removeSlot(node, i));
-    slotEx.removeBtn.__zouyuSlotExtra = true;
-    if (slotEx.folderBtn) moveWidgetAfter(node, slotEx.removeBtn, slotEx.folderBtn);
-  }
-  if (slotEx.removeBtn) {
-    setWidgetHidden(slotEx.removeBtn, compact);
+  if (node.__zouyuLang !== st.lang) {
+    const bar = overlay.querySelector(".zouyu-import-bar");
+    if (bar) {
+      bar.dataset.text = zhText(node, "📥 拖入文件夹导入模型（或点击选择）", "📥 Drop folder to import models (or click)");
+      bar.textContent = bar.dataset.text;
+    }
+    node.__zouyuLang = st.lang;
   }
 }
 
-/** 按当前状态应用控件显隐 + 输出端口命名。 */
+/** 触发 widgets 网格尺寸变化 → ResizeObserver → 槽位布局重测（让端口点新位置生效）。 */
+function forceSlotResync(node) {
+  const el = nodeEl(node);
+  const grid = el?.querySelector('[data-testid="node-widgets"]');
+  if (!grid) return;
+  grid.style.minHeight = "1px";
+  setTimeout(() => { grid.style.minHeight = ""; }, 80);
+}
+
+/** 节点 DOM 被 Vue 重挂载时自动补挂叠加层。 */
+function watchLoaderOverlay(node) {
+  const el = nodeEl(node);
+  if (!el || el.__zouyuOverlayObs) return;
+  el.__zouyuOverlayObs = new MutationObserver(() => {
+    if (!el.querySelector(".zouyu-loader-overlay")) layoutLoaderOverlay(node);
+  });
+  el.__zouyuOverlayObs.observe(el, { childList: true });
+}
+
+function zhText(node, zh, en) {
+  return node.__zouyuLang !== "English" ? zh : en;
+}
+
+function importBarEl(node) {
+  return nodeEl(node)?.querySelector(".zouyu-import-bar") || null;
+}
+
+function showImportResult(node, text, isError) {
+  const bar = importBarEl(node);
+  if (!bar) return;
+  bar.textContent = text;
+  bar.style.color = isError ? "#ff8a80" : "#8bc34a";
+  clearTimeout(bar._zouyuTimer);
+  bar._zouyuTimer = setTimeout(() => {
+    bar.textContent = bar.dataset.text || "";
+    bar.style.color = "";
+  }, 6000);
+}
+
+/** 递归收集拖入目录的所有文件（webkitGetAsEntry）。 */
+function collectDroppedFolder(dt) {
+  return new Promise((resolve) => {
+    const items = dt?.items ? [...dt.items] : [];
+    const entries = items
+      .map((it) => (typeof it.webkitGetAsEntry === "function" ? it.webkitGetAsEntry() : null))
+      .filter(Boolean);
+    const dir = entries.find((en) => en.isDirectory);
+    if (!dir) { resolve(null); return; }
+    const files = [];
+    let pending = 1;
+    const maybeDone = () => { pending--; if (pending <= 0) resolve({ name: dir.name || null, files }); };
+    const walk = (entry) => {
+      const reader = entry.createReader();
+      const readBatch = () => {
+        reader.readEntries((batch) => {
+          if (!batch.length) { maybeDone(); return; }
+          for (const en of batch) {
+            if (en.isFile) {
+              pending++;
+              en.file((f) => { files.push(f); maybeDone(); });
+            } else if (en.isDirectory) {
+              pending++;
+              walk(en);
+              maybeDone();
+            }
+          }
+          readBatch();
+        }, () => maybeDone());
+      };
+      readBatch();
+    };
+    walk(dir);
+    setTimeout(() => resolve({ name: dir.name || null, files }), 30000);
+  });
+}
+
+/** 把文件上传到 models/<name>（同名文件夹复用/新建），并刷新槽位。 */
+async function importFolderEntries(node, folderName, files) {
+  if (!folderName || !files.length) return;
+  const bar = importBarEl(node);
+  if (bar) bar.textContent = zhText(node, `上传中 ${files.length} 个文件…`, `Uploading ${files.length} files…`);
+  try {
+    const fd = new FormData();
+    fd.append("folder_name", folderName);
+    for (const f of files) fd.append("files", f, f.name);
+    const r = await fetch("/zouyu_model_loader/import_folder", { method: "POST", body: fd });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.ok) { showImportResult(node, (d.error || r.statusText || "导入失败"), true); return; }
+    showImportResult(node, zhText(node, `已导入 ${d.count} 个文件 → models/${d.target}`, `Imported ${d.count} files → models/${d.target}`), false);
+    // 刷新各槽位下拉选项
+    const st = node.__zouyuSlotState;
+    for (let i = 0; i < MAX_MODELS; i++) {
+      const s = st && st.slots[i];
+      if (s && s.type && s.type !== "未使用") await refreshSlotFileOptions(node, i);
+    }
+    // 第一个可见空槽位的文件夹指向导入目标
+    for (let i = 0; i < visibleSlotCount(st); i++) {
+      const s = st.slots[i];
+      if (s && s.type && s.type !== "未使用" && (!s.folder || s.folder === TYPE_CATEGORY[s.type])) {
+        s.folder = d.target;
+        const fw = slotWidgets(node, i).folder;
+        if (fw) fw.value = d.target;
+        await refreshSlotFileOptions(node, i);
+        break;
+      }
+    }
+  } catch (err) {
+    showImportResult(node, "导入失败: " + (err && err.message || err), true);
+  }
+}
+
+/** 点击导入条：showDirectoryPicker 选择文件夹并导入。 */
+async function pickAndImportFolder(node) {
+  try {
+    if (window.showDirectoryPicker) {
+      const handle = await window.showDirectoryPicker();
+      const files = [];
+      const walk = async (dh) => {
+        for await (const [name, h] of dh.entries()) {
+          if (h.kind === "file") {
+            const f = await h.getFile();
+            try { Object.defineProperty(f, "webkitRelativePath", { value: `${dh.name}/${name}` }); } catch { /* noop */ }
+            files.push(f);
+          } else if (h.kind === "directory") {
+            await walk(h);
+          }
+        }
+      };
+      await walk(handle);
+      if (!files.length) { showImportResult(node, zhText(node, "文件夹为空", "Folder is empty"), true); return; }
+      await importFolderEntries(node, handle.name, files);
+      return;
+    }
+    // 兼容回退：隐藏 <input webkitdirectory>
+    const picked = await new Promise((resolve) => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.webkitdirectory = true;
+      input.style.display = "none";
+      document.body.appendChild(input);
+      let done = false;
+      const finish = (v) => { if (!done) { done = true; input.remove(); resolve(v); } };
+      input.onchange = () => {
+        const files = [...(input.files || [])];
+        const name = files[0]?.webkitRelativePath?.split("/")[0] || null;
+        finish(name ? { name, files } : null);
+      };
+      input.oncancel = () => finish(null);
+      input.click();
+    });
+    if (!picked) return;
+    await importFolderEntries(node, picked.name, picked.files);
+  } catch (err) {
+    if (err && err.name === "AbortError") return;
+    showImportResult(node, "选择失败: " + (err && err.message || err), true);
+  }
+}
+
+/** 节点级拖入文件夹（Vue 前端通过 node.onDragOver/onDragDrop 回调）。 */
+function setupLoaderDragDrop(node) {
+  node.onDragOver = (e) => {
+    try {
+      const items = e.dataTransfer?.items ? [...e.dataTransfer.items] : [];
+      return items.some((it) => {
+        const entry = typeof it.webkitGetAsEntry === "function" && it.webkitGetAsEntry();
+        return !!entry && entry.isDirectory;
+      });
+    } catch { return false; }
+  };
+  node.onDragDrop = async (e) => {
+    try {
+      const folder = await collectDroppedFolder(e.dataTransfer);
+      if (!folder || !folder.files.length) {
+        showImportResult(node, zhText(node, "未识别到文件夹（请使用 Chrome/Edge 拖入）", "No folder detected (use Chrome/Edge)"), true);
+        return true;
+      }
+      await importFolderEntries(node, folder.name, folder.files);
+      return true;
+    } catch (err) {
+      showImportResult(node, "导入失败: " + (err && err.message || err), true);
+      return true;
+    }
+  };
+}
+
+/** 按当前状态应用控件显隐 + 行布局 + 端口平移。 */
 function applySlotVisibility(node) {
   const st = node.__zouyuSlotState;
   if (!st) return;
@@ -734,20 +1051,27 @@ function applySlotVisibility(node) {
     const visible = i < count;
     const s = st.slots[i] || (st.slots[i] = { type: "未使用", folder: "", name: "(未选择)", files: [] });
     const used = visible && s.type !== "未使用";
-    setWidgetHidden(w.type, !visible);
-    setWidgetHidden(w.name, !visible);
+    // 集成模式：不显示类型/文件夹，只显示文件列（类型只在端口旁显示）
+    setWidgetHidden(w.type, !visible || compact);
+    setWidgetHidden(w.name, !visible || (!used && !compact));
     setWidgetHidden(w.folder, !visible || !used || compact);
-    ensureSlotExtras(node, i, visible, used, compact);
-    // 同步控件值
     if (w.type && w.type.value !== s.type) w.type.value = s.type;
     if (w.folder && w.folder.value !== s.folder) w.folder.value = s.folder;
     if (w.name && w.name.value !== s.name) w.name.value = s.name;
   }
   syncLoaderOutputs(node);
-  app.graph?.setDirtyCanvas(true, false);
+  app.graph?.setDirtyCanvas(true, true);
+  requestAnimationFrame(() => {
+    layoutLoaderOverlay(node);
+    forceSlotResync(node);
+  });
+  setTimeout(() => {
+    layoutLoaderOverlay(node);
+    forceSlotResync(node);
+  }, 60);
 }
 
-/** 输出端口与模型一一对应：按类型编号命名（主模型0/主模型1/lora0/...）。 */
+/** 输出端口与模型一一对应：按类型编号命名（主模型0/主模型1/lora0/...），端口文字隐藏由行尾标签展示。 */
 function syncLoaderOutputs(node) {
   const st = node.__zouyuSlotState;
   if (!st) return;
@@ -758,16 +1082,15 @@ function syncLoaderOutputs(node) {
     if (!node.outputs[i]) continue;
     const used = s && s.type && s.type !== "未使用" && s.name && s.name !== "(未选择)";
     if (!used) {
-      node.outputs[i].label = "";
       node.outputs[i].name = "";
+      node.outputs[i].label = "";
       continue;
     }
     const tkey = TYPE_KEYS[s.type] || "other";
     ordinals[tkey] = (ordinals[tkey] || 0) + 1;
     const base = zh ? (TYPE_PORT_NAMES[tkey] || "其他") : (TYPE_PORT_NAMES_EN[tkey] || "other");
-    const label = base + (ordinals[tkey] - 1);
-    node.outputs[i].name = label;
-    node.outputs[i].label = label;
+    node.outputs[i].name = base + (ordinals[tkey] - 1);
+    node.outputs[i].label = "";
     node.outputs[i].type = "*";
   }
   app.graph?.setDirtyCanvas(true, false);
@@ -786,7 +1109,7 @@ function applyLoaderLabels(node) {
   }
 }
 
-/** 「选择模型文件夹」：直接打开系统原生文件夹对话框（取消一律静默）。 */
+/** 「选择模型文件夹」（行尾 📁）：原生目录选择，取消一律静默。 */
 async function pickSlotFolder(node, i) {
   const st = node.__zouyuSlotState;
   const s = st.slots[i];
@@ -800,7 +1123,8 @@ async function pickSlotFolder(node, i) {
     } catch (e) {
       return;
     }
-  } else {
+  }
+  if (!folderName) {
     folderName = await new Promise((resolve) => {
       const input = document.createElement("input");
       input.type = "file";
@@ -855,9 +1179,7 @@ function removeSlot(node, i) {
 }
 
 function setupModelLoaderNode(node) {
-  ensureStatusStyles();
-  statusNodes.add(node);
-  startStatusPolling();
+  ensureLoaderOverlayStyle();
 
   // 从 schema 原生控件读取状态
   const st = { compact: false, lowVram: false, lang: getLang(), slots: {} };
@@ -876,7 +1198,6 @@ function setupModelLoaderNode(node) {
   node.__zouyuSlotState = st;
   node.__zouyuLang = st.lang;
   node.__zouyuStatus = {};
-  node.__zouyuExtras = {};
 
   // 挂接回调（包装原有回调，保证值仍然流向后端）
   for (let i = 0; i < MAX_MODELS; i++) {
@@ -944,11 +1265,25 @@ function setupModelLoaderNode(node) {
     if (s.type && s.type !== "未使用") refreshSlotFileOptions(node, Number(i));
   }
   refreshStatusDOM(node);
+
+  // 拖入文件夹导入
+  setupLoaderDragDrop(node);
+
+  // 布局：等 Vue 渲染出节点 DOM 后挂载叠加层 + 平移端口点
+  const layoutPass = () => {
+    layoutLoaderOverlay(node);
+    forceSlotResync(node);
+  };
+  setTimeout(layoutPass, 0);
+  setTimeout(layoutPass, 120);
+  setTimeout(layoutPass, 400);
+  setTimeout(() => watchLoaderOverlay(node), 600);
   // 延时重同步：防止框架在 onNodeCreated 后重建控件覆盖显隐/回调
   setTimeout(() => {
     try { applySlotVisibility(node); applyLoaderLabels(node); } catch (e) { /* ignore */ }
   }, 150);
 }
+
 
 function setupModelGuardNode(node) {
   ensureStatusStyles();

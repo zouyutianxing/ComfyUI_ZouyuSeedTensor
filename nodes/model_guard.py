@@ -336,6 +336,56 @@ def _models_root():
     return os.path.dirname(os.path.abspath(roots[0])) if roots else ""
 
 
+# 合并文件列表缓存（短 TTL：拖入导入后数秒内自动刷新，无需重启）
+_ALL_FILES_CACHE = {"ts": 0.0, "files": None}
+
+
+def all_model_files():
+    """全部模型文件合并列表（10 大官方分类 + models 根下任意自定义文件夹）。
+
+    同时收录「相对 models 根的路径」与「纯文件名」两种形态：
+    - 前端下拉按文件夹过滤后显示纯文件名，校验用纯文件名通过；
+    - 相对路径形态兼容用户在文件夹输入框手填完整路径。
+    拖入导入的新文件在导入后数秒内即被校验接受（无需重启）。
+    """
+    now = time.time()
+    cached = _ALL_FILES_CACHE["files"]
+    if cached is not None and now - _ALL_FILES_CACHE["ts"] < 5:
+        return cached
+    cats = ["diffusion_models", "text_encoders", "vae", "loras", "checkpoints",
+            "clip_vision", "style_models", "upscale_models", "controlnet", "gligen"]
+    files, seen = [], set()
+    def _add(f):
+        if f not in seen:
+            seen.add(f)
+            files.append(f)
+    for c in cats:
+        for f in folder_paths.get_filename_list(c):
+            _add(f)
+    models_root = _models_root()
+    if models_root and os.path.isdir(models_root):
+        for dirpath, dirnames, filenames in os.walk(models_root):
+            rel = os.path.relpath(dirpath, models_root)
+            depth = 0 if rel == "." else rel.count(os.sep) + 1
+            if depth > 4:
+                dirnames[:] = []
+                continue
+            for fn in filenames:
+                if os.path.splitext(fn)[1].lower() in folder_paths.supported_pt_extensions:
+                    relf = os.path.relpath(os.path.join(dirpath, fn), models_root).replace("\\", "/")
+                    _add(relf)
+                    _add(os.path.basename(relf))  # 纯文件名形态（下拉/校验主用）
+    _add("(未选择)")
+    _ALL_FILES_CACHE["files"] = files
+    _ALL_FILES_CACHE["ts"] = now
+    return files
+
+
+def bust_model_files_cache():
+    """拖入导入完成后立即失效缓存，让新文件马上可被校验。"""
+    _ALL_FILES_CACHE["ts"] = 0.0
+
+
 def _safe_join(base, rel):
     """把 rel 安全拼到 base 下，拒绝越界（防路径穿越）。"""
     base = os.path.abspath(base)
@@ -488,6 +538,52 @@ def find_folder(name):
     return {"found": hits}
 
 
+async def import_folder_files(folder_name, file_parts):
+    """把拖入/选择的模型文件写入 models/<name>。
+
+    规则（用户需求）：models 目录树中存在同名文件夹则直接复用；
+    不存在则在 models 根下新建以拖入文件夹名命名的文件夹。
+    每个文件只取 basename 落盘（防路径穿越），返回目标相对路径。
+    """
+    name = os.path.basename((folder_name or "").strip().strip("/\\"))
+    if not name or name in (".", ".."):
+        raise ValueError("无效的文件夹名")
+    models_root = _models_root()
+    if not models_root:
+        raise ValueError("找不到 models 目录")
+    # 在 models 树中查找同名文件夹（限深 3 层）
+    target = None
+    for dirpath, dirnames, _filenames in os.walk(models_root):
+        rel = os.path.relpath(dirpath, models_root)
+        depth = 0 if rel == "." else rel.count(os.sep) + 1
+        if depth > 3:
+            dirnames[:] = []
+            continue
+        if name in dirnames:
+            target = os.path.join(dirpath, name)
+            break
+    if target is None:
+        target = _safe_join(models_root, name)
+    os.makedirs(target, exist_ok=True)
+    written = []
+    for filename, part in file_parts:
+        fn = os.path.basename(str(filename or "").strip().strip("/\\"))
+        if not fn or fn in (".", ".."):
+            continue
+        dest = _safe_join(target, fn)
+        with open(dest, "wb") as f:
+            while True:
+                chunk = await part.read_chunk(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+        written.append(fn)
+    if not written:
+        raise ValueError("没有可写入的模型文件")
+    rel = os.path.relpath(target, models_root).replace("\\", "/")
+    return {"target": rel, "count": len(written), "files": sorted(set(written))}
+
+
 def reveal_path(path):
     """在操作系统的文件资源管理器中打开（Windows explorer.exe）。"""
     try:
@@ -530,6 +626,32 @@ def register_routes():
     @routes.get("/zouyu_model_loader/reveal")
     async def _reveal(request):
         return web.json_response(reveal_path(request.query.get("path", "")))
+
+    @routes.post("/zouyu_model_loader/import_folder")
+    async def _import_folder(request):
+        """接收拖入的文件夹：multipart 表单 folder_name + 若干 files，写入 models/<name>。"""
+        try:
+            reader = await request.multipart()
+            folder_name = ""
+            file_parts = []
+            while True:
+                part = await reader.next()
+                if part is None:
+                    break
+                if part.name == "folder_name":
+                    folder_name = (await part.read()).decode("utf-8", "replace")
+                elif part.filename:
+                    file_parts.append((part.filename, part))
+            if not folder_name:
+                return web.json_response({"ok": False, "error": "缺少文件夹名"}, status=400)
+            if not file_parts:
+                return web.json_response({"ok": False, "error": "没有收到文件"}, status=400)
+            result = await import_folder_files(folder_name, file_parts)
+            bust_model_files_cache()  # 新文件立即可被下拉与校验接受
+            result["ok"] = True
+            return web.json_response(result)
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)[:300]}, status=400)
 
     @routes.get("/zouyu_model_loader/status")
     async def _status(request):
