@@ -80,6 +80,19 @@ const LABELS = {
   ref_images: { zh: "参考图", en: "Ref Images" },
   ref_videos: { zh: "参考视频", en: "Ref Videos" },
   ref_audio: { zh: "参考音频", en: "Ref Audio" },
+  // ---- 模型加载器 / 模型占用检测 ----
+  unet_folder: { zh: "UNET 文件夹", en: "UNET Folder" },
+  unet_name: { zh: "UNET 模型", en: "UNET Model" },
+  weight_dtype: { zh: "权重精度", en: "Weight Dtype" },
+  clip_folder: { zh: "CLIP 文件夹", en: "CLIP Folder" },
+  clip_name: { zh: "文本编码器", en: "CLIP Model" },
+  clip_type: { zh: "编码器类型", en: "CLIP Type" },
+  clip_device: { zh: "编码器设备", en: "CLIP Device" },
+  vae_folder: { zh: "视频VAE 文件夹", en: "Video VAE Folder" },
+  vae_name: { zh: "视频VAE", en: "Video VAE" },
+  audio_vae_folder: { zh: "音频VAE 文件夹", en: "Audio VAE Folder" },
+  audio_vae_name: { zh: "音频VAE", en: "Audio VAE" },
+  low_vram_mode: { zh: "低显存模式", en: "Low VRAM Mode" },
 };
 
 // combo：keys 为后端英文键（稳定不变），zh/en 为前端显示文字
@@ -93,6 +106,7 @@ const COMBOS = {
 
 const BOOL_LABELS = {
   rebuild: { zh: ["重建目录", "读取目录"], en: ["Rebuild", "Read"] },
+  low_vram_mode: { zh: ["彻底卸载", "CPU缓存"], en: ["Full unload", "CPU cache"] },
 };
 
 const TITLES = {
@@ -103,6 +117,8 @@ const TITLES = {
   ZouyuSeedCatalog: { zh: "种子目录", en: "Seed Catalog" },
   ZouyuSeedPreview: { zh: "种子预览", en: "Seed Preview" },
   ZouyuClearTemp: { zh: "清空临时存储", en: "Clear Temp Storage" },
+  ZouyuModelLoader: { zh: "模型加载器", en: "Model Loader" },
+  ZouyuModelGuard: { zh: "模型占用检测", en: "Model Guard" },
 };
 
 const NODE_COLORS = {
@@ -113,6 +129,8 @@ const NODE_COLORS = {
   ZouyuSeedCatalog: { color: "#6b6b6b", bgcolor: "#262626" },
   ZouyuSeedPreview: { color: "#b0722a", bgcolor: "#3a2812" },
   ZouyuClearTemp: { color: "#a03838", bgcolor: "#3a1616" },
+  ZouyuModelLoader: { color: "#3d8b40", bgcolor: "#142b16" },
+  ZouyuModelGuard: { color: "#8a6d1f", bgcolor: "#2b2310" },
 };
 
 // 参考端口槽位 label（V3 autogrow 嵌套名 ref_images.ref_image_0 -> 参考图 1）
@@ -446,6 +464,201 @@ function addButton(node, keyZh, keyEn, onClick) {
 }
 
 // ---------------------------------------------------------------------------
+// 模型加载器 / 模型占用检测：文件夹选择、文件刷新、红/绿/蓝状态灯
+// ---------------------------------------------------------------------------
+
+const LOADER_MODELS = [
+  { folder: "unet_folder", file: "unet_name", category: "diffusion_models" },
+  { folder: "clip_folder", file: "clip_name", category: "text_encoders" },
+  { folder: "vae_folder", file: "vae_name", category: "vae" },
+  { folder: "audio_vae_folder", file: "audio_vae_name", category: "vae" },
+];
+
+let loaderNodes = new Set();
+let statusTimer = null;
+
+function setNodeBadges(node, badges) {
+  if (!node) return;
+  try {
+    if (typeof node.setBadges === "function") {
+      node.setBadges(badges);
+    } else {
+      node.badges = badges;
+    }
+  } catch (e) {
+    /* 旧版前端忽略徽章 */
+  }
+}
+
+function statusBadges(payload, lang) {
+  const zh = lang !== "English";
+  return (payload?.models || []).map((m) => ({
+    text: `${m.label}: ${zh ? m.zh : m.en}`,
+    color: m.color || "#9e9e9e",
+  }));
+}
+
+function startStatusPolling() {
+  if (statusTimer) return;
+  statusTimer = setInterval(async () => {
+    try {
+      const r = await fetch("/zouyu_model_loader/status");
+      if (!r.ok) return;
+      const payload = await r.json();
+      for (const node of loaderNodes) {
+        setNodeBadges(node, statusBadges(payload, node.__zouyuLang || getLang()));
+      }
+    } catch (e) {
+      /* 服务端未就绪时忽略 */
+    }
+  }, 2500);
+}
+
+async function refreshModelFiles(category, folder, fileWidget) {
+  try {
+    const d = await fetchJson(
+      `/zouyu_model_loader/files?category=${encodeURIComponent(category)}&folder=${encodeURIComponent(folder || ".")}`
+    );
+    const values = (d.files || []).length ? d.files : ["(无文件)"];
+    if (fileWidget.options) fileWidget.options.values = values;
+    if (!values.includes(fileWidget.value)) fileWidget.value = values[0];
+    if (typeof fileWidget.callback === "function") fileWidget.callback(fileWidget.value);
+  } catch (e) {
+    console.error("[ZouyuSeedTensor] 刷新模型文件失败:", e);
+  }
+}
+
+const FOLDER_MENU_STYLE = `
+.zouyu-folder-menu{position:fixed;z-index:99999;min-width:280px;max-width:420px;max-height:320px;
+  overflow:auto;background:#2a2a2a;border:1px solid #4a4a4a;border-radius:8px;
+  box-shadow:0 8px 24px rgba(0,0,0,.5);padding:6px 0;font-size:12px}
+.zouyu-folder-menu.hidden{display:none}
+.zouyu-folder-head{padding:6px 12px;color:#8fd0ff;font-weight:600;word-break:break-all;border-bottom:1px solid #3a3a3a}
+.zouyu-folder-item{display:flex;align-items:center;gap:8px;padding:6px 12px;cursor:pointer;color:#ddd}
+.zouyu-folder-item:hover,.zouyu-folder-item.active{background:#3a3a3a;color:#fff}
+.zouyu-folder-item .tag{margin-left:auto;font-size:10px;color:#888}
+`;
+
+let folderMenuStylesInjected = false;
+
+function ensureFolderMenuStyles() {
+  if (folderMenuStylesInjected) return;
+  folderMenuStylesInjected = true;
+  const el = document.createElement("style");
+  el.textContent = FOLDER_MENU_STYLE;
+  document.head.appendChild(el);
+}
+
+let folderMenuEl = null;
+
+function getFolderMenu() {
+  if (folderMenuEl) return folderMenuEl;
+  folderMenuEl = document.createElement("div");
+  folderMenuEl.className = "zouyu-folder-menu hidden";
+  document.body.appendChild(folderMenuEl);
+  folderMenuEl.addEventListener("mousedown", (e) => e.preventDefault());
+  return folderMenuEl;
+}
+
+function closeFolderMenu() {
+  getFolderMenu().classList.add("hidden");
+}
+
+/**
+ * 打开"models 文件夹"选择菜单：展示 category 根目录及其一级子文件夹，
+ * 选中后写入 folder 控件并刷新文件下拉（点击位置自动定位到按钮旁）。
+ */
+async function openFolderPicker(node, category, folderWidget, fileWidget, anchorBtn) {
+  ensureFolderMenuStyles();
+  const menu = getFolderMenu();
+  try {
+    const d = await fetchJson(`/zouyu_model_loader/folders?category=${encodeURIComponent(category)}`);
+    const zh = (node.__zouyuLang || getLang()) !== "English";
+    const root = d.root || "";
+    menu.innerHTML = "";
+    const head = document.createElement("div");
+    head.className = "zouyu-folder-head";
+    head.textContent = (zh ? "📁 models 目录: " : "📁 models root: ") + root;
+    menu.appendChild(head);
+
+    const folders = d.folders || ["."];
+    folders.forEach((f) => {
+      const row = document.createElement("div");
+      row.className = "zouyu-folder-item";
+      const isRoot = f === ".";
+      row.innerHTML = isRoot
+        ? `<span>${zh ? "根目录" : "Root"}</span><span class="tag">${category}</span>`
+        : `<span>📂 ${f}</span><span class="tag">${category}/${f}</span>`;
+      row.onmousedown = (e) => {
+        e.preventDefault();
+        closeFolderMenu();
+        folderWidget.value = isRoot ? category : f;
+        if (typeof folderWidget.callback === "function") folderWidget.callback(folderWidget.value);
+        refreshModelFiles(category, folderWidget.value, fileWidget);
+        app.graph?.setDirtyCanvas(true, false);
+      };
+      menu.appendChild(row);
+    });
+
+    const rect = (anchorBtn?.getBoundingClientRect?.()) || node.getBoundingClientRect?.();
+    menu.classList.remove("hidden");
+    const mh = menu.offsetHeight || 260;
+    const mw = menu.offsetWidth || 300;
+    let top = (rect?.bottom || 0) + 4;
+    if (top + mh > window.innerHeight - 8) top = Math.max(8, (rect?.top || 0) - mh - 4);
+    let left = Math.min(rect?.left || 8, window.innerWidth - mw - 8);
+    left = Math.max(8, left);
+    menu.style.top = `${Math.round(top)}px`;
+    menu.style.left = `${Math.round(left)}px`;
+  } catch (e) {
+    console.error("[ZouyuSeedTensor] 打开文件夹选择失败:", e);
+  }
+}
+
+function setupModelLoaderNode(node) {
+  loaderNodes.add(node);
+  startStatusPolling();
+
+  for (const c of LOADER_MODELS) {
+    const fw = node.widgets?.find((w) => w.name === c.folder);
+    const flw = node.widgets?.find((w) => w.name === c.file);
+    if (!fw || !flw) continue;
+
+    // 手动修改文件夹文本时联动刷新文件列表
+    const origFolderCallback = fw.callback;
+    fw.callback = function (value) {
+      const r = origFolderCallback?.call(this, value);
+      refreshModelFiles(c.category, value, flw);
+      return r;
+    };
+
+    const btn = addButton(node, "📁 选文件夹", "📁 Folder", () => {
+      openFolderPicker(node, c.category, fw, flw, btn);
+    });
+  }
+
+  addButton(node, "🔄 刷新文件", "🔄 Refresh", async () => {
+    for (const c of LOADER_MODELS) {
+      const fw = node.widgets?.find((w) => w.name === c.folder);
+      const flw = node.widgets?.find((w) => w.name === c.file);
+      if (fw && flw) await refreshModelFiles(c.category, fw.value, flw);
+    }
+    app.graph?.setDirtyCanvas(true, false);
+  });
+
+  // 首次创建即拉一次状态
+  (async () => {
+    try {
+      const r = await fetch("/zouyu_model_loader/status");
+      if (r.ok) {
+        const payload = await r.json();
+        setNodeBadges(node, statusBadges(payload, node.__zouyuLang || getLang()));
+      }
+    } catch (e) { /* ignore */ }
+  })();
+}
+
+// ---------------------------------------------------------------------------
 // 扩展注册
 // ---------------------------------------------------------------------------
 app.registerExtension({
@@ -467,6 +680,13 @@ app.registerExtension({
       return r;
     };
 
+    const origOnRemoved = nodeType.prototype.onRemoved;
+    nodeType.prototype.onRemoved = function () {
+      const r = origOnRemoved?.apply(this, arguments);
+      loaderNodes.delete(this);
+      return r;
+    };
+
     const onNodeCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
       const r = onNodeCreated?.apply(this, arguments);
@@ -484,6 +704,10 @@ app.registerExtension({
 
         if (comfyClass === "ZouyuSeedLoader") {
           setupMentionAutocomplete(node);
+        }
+
+        if (comfyClass === "ZouyuModelLoader") {
+          setupModelLoaderNode(node);
         }
 
         const langWidget = node.widgets?.find((w) => w.name === "language");
@@ -529,4 +753,19 @@ app.registerExtension({
 // 后端保存/刷新后自动更新所有文件下拉
 api.addEventListener("Zouyu-seed-files-refresh", () => {
   refreshAllFileCombos();
+});
+
+// 模型加载器执行完成后立即刷新状态灯（兜底：另有 2.5s 轮询）
+api.addEventListener("executed", (event) => {
+  try {
+    const detail = event.detail;
+    if (!detail || detail.nodeId == null) return;
+    const node = app.graph?._nodes?.find((n) => String(n.id) === String(detail.nodeId));
+    if (!node || node.comfyClass !== "ZouyuModelLoader") return;
+    const uis = Array.isArray(detail.output) ? detail.output : [detail.output];
+    const status = uis?.find((u) => u && u.zouyu_status)?.zouyu_status;
+    if (status) setNodeBadges(node, statusBadges(status, node.__zouyuLang || getLang()));
+  } catch (e) {
+    /* ignore */
+  }
 });

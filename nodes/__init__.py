@@ -11,6 +11,8 @@ from .extract_media import ZouyuExtractSeedMedia
 from .seed_catalog import ZouyuSeedCatalog
 from .preview_seed import ZouyuSeedPreview
 from .clear_temp import ZouyuClearTemp
+from .model_loader import ZouyuModelLoader
+from .model_guard import ZouyuModelGuard
 
 
 # 全部节点（按展示顺序）
@@ -22,4 +24,6 @@ ALL_NODES = [
     ZouyuSeedCatalog,
     ZouyuSeedPreview,
     ZouyuClearTemp,
+    ZouyuModelLoader,
+    ZouyuModelGuard,
 ]

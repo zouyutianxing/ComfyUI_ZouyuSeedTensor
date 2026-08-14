@@ -20,6 +20,7 @@ from .core import (
     scan_seed_files, scan_temp_files, scan_all_seed_files,
     load_catalog, rebuild_catalog, clear_temp_dir,
 )
+from .nodes.model_guard import register_routes as register_model_guard_routes
 
 # 前端扩展目录（中英文切换、@ 下拉、预览、按钮）
 WEB_DIRECTORY = "./web"
@@ -84,3 +85,4 @@ def _register_routes():
 
 
 _register_routes()
+register_model_guard_routes()
