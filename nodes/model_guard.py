@@ -1,18 +1,8 @@
 """
-Zouyu Model Guard — 模型占用检测节点 + 两个新节点共享的模型状态注册表。
+Zouyu Model Guard — 共享模型状态注册表 + 节点2（模型加载开关 ZouyuModelSwitch）。
 
-节点2（ZouyuModelGuard）：接在模型连线上（MODEL/CLIP/VAE 均可，多个可同时接）。
-本节点执行时，其所有下游消费者都已经运行完毕，此刻可判定模型"空闲"（未被调用），
-随后把"闲置信号"写入共享注册表，并按节点1（ZouyuModelLoader）写入的低显存开关决定动作：
-
-- 开关关闭（默认）：不干预。由 ComfyUI 官方模型管理在需要显存时自动把闲置模型
-  卸载到 CPU 内存（状态灯 → 蓝色）。
-- 开关开启（极低显存）：立即把该模型从显存彻底卸载；若运行在 DynamicVRAM 模式
-  （ModelPatcherDynamic），还会释放 CPU 内存（状态灯 → 红色）；传统 ModelPatcher
-  权重常驻内存、无法释放，只能卸载到 CPU（状态灯 → 蓝色，并给出提示）。
-
-节点1 在下一次执行时消费这些信号，用于状态展示与日志。注册表为同一进程内的
-模块级状态，两个节点与 HTTP 路由（前端轮询红/绿/蓝状态灯）互通。
+共享注册表：模型加载器（节点1）每次执行后登记模型，模型加载开关（节点2）按信号
+触发加载/卸载任务，HTTP 路由（前端轮询红/绿/蓝状态灯与状态文字）互通。
 """
 
 import os
@@ -60,10 +50,10 @@ SLOT_TYPE_LABELS = {
 }
 
 STATE_INFO = {
-    "gpu":     {"zh": "已加载(GPU)", "en": "Loaded (GPU)", "color": "#4caf50"},
-    "cpu":     {"zh": "CPU缓存",     "en": "CPU cached",   "color": "#2196f3"},
-    "free":    {"zh": "未加载",      "en": "Not loaded",   "color": "#f44336"},
-    "unknown": {"zh": "未知",        "en": "Unknown",      "color": "#9e9e9e"},
+    "gpu":     {"zh": "已加载",     "en": "Loaded",      "color": "#4caf50"},
+    "cpu":     {"zh": "卸载至内存", "en": "In RAM",      "color": "#2196f3"},
+    "free":    {"zh": "未加载",     "en": "Not loaded",  "color": "#f44336"},
+    "unknown": {"zh": "未知",       "en": "Unknown",     "color": "#9e9e9e"},
 }
 
 MODEL_TYPE_INFO = {
@@ -118,8 +108,11 @@ def residency(patcher):
         return "unknown"
 
 
-def register(kind, name, obj, model_type=""):
-    """节点1 每次执行后登记四个模型（同 kind 旧条目被替换，旧 patcher 交由 GC 回收）"""
+def register(kind, name, obj, model_type="", folder="", tkey=""):
+    """节点1 每次执行后登记模型（同 kind 旧条目被替换，旧 patcher 交由 GC 回收）。
+
+    folder/tkey 记录模型来源，供"模型加载开关"节点按需重新加载。
+    """
     with _LOCK:
         patcher = _patcher_of(obj)
         _REGISTRY["models"][kind] = {
@@ -128,6 +121,8 @@ def register(kind, name, obj, model_type=""):
             "obj": obj,
             "patcher": patcher,
             "model_type": model_type,
+            "folder": folder,
+            "tkey": tkey,
             "state": residency(patcher),
             "ts": _now(),
         }
@@ -281,6 +276,100 @@ def evaluate_idle(kind, patcher, zh, has_trigger=False):
             return ("[{}] 已卸载到CPU（传统模型无法释放内存）".format(label), st2, "none")
         return ("[{}] 尚未被调用（或已在CPU缓存），跳过".format(label), st2, "none")
     return ("[{}] 已完全卸载，无需处理".format(label), st, "none")
+
+
+# ---------------------------------------------------------------------------
+# 模型加载开关（节点2 → 新"模型加载开关"）：按信号经过向加载器发送加载/卸载任务
+# ---------------------------------------------------------------------------
+
+SWITCH_SLOT_COUNT = 8
+
+
+def configured_model_kinds():
+    """已登记（配置好）的模型槽位 kind 列表（供开关下拉显示）。"""
+    with _LOCK:
+        kinds = [k for k in _REGISTRY["models"] if k.startswith("slot")]
+    return sorted(kinds, key=lambda k: (len(k), k))
+
+
+def configured_model_options():
+    """开关下拉校验选项：占位符 + 全部槽位 kind（任何时刻已保存的值都能通过校验）。
+    前端只把"已配置"的 kind 放进下拉显示。"""
+    return ["(未选择)"] + ["slot{}".format(i) for i in range(SWITCH_SLOT_COUNT)]
+
+
+def _slot_label(kind, zh):
+    with _LOCK:
+        e = _REGISTRY["models"].get(kind)
+    if e is None:
+        return kind
+    mtype = e.get("model_type", "")
+    if kind.startswith("slot") and mtype in SLOT_TYPE_LABELS:
+        t = SLOT_TYPE_LABELS[mtype]
+        return (t["zh"] if zh else t["en"]) + kind[len("slot"):]
+    return kind
+
+
+def load_or_unload_model(kind, do_load, zh):
+    """模型加载开关：信号经过时按开关执行 加载/彻底卸载，返回说明文字。"""
+    with _LOCK:
+        e = _REGISTRY["models"].get(kind)
+    if e is None:
+        return ("未找到模型 {}（请先运行一次模型加载器）".format(kind)
+                if zh else "model {} not found (run the loader first)".format(kind))
+    name = e.get("name", "") or kind
+    label = _slot_label(kind, zh)
+    if do_load:
+        return _do_load_model(e, name, label, zh)
+    return _do_unload_model(e, name, label, zh)
+
+
+def _do_load_model(e, name, label, zh):
+    """加载：优先把现有 patcher 载入显存（保持下游对象一致）；失败则按登记文件重载。"""
+    kind = e["kind"]
+    patcher = e.get("patcher")
+    if patcher is not None:
+        try:
+            model_management.load_model_gpu(patcher)
+            with _LOCK:
+                cur = _REGISTRY["models"].get(kind)
+                if cur is not None:
+                    cur["state"] = residency(patcher)
+                    cur["ts"] = _now()
+            return ("已加载 {} {}（{}）".format(label, name, "显存")
+                    if zh else "loaded {} {} (VRAM)".format(label, name))
+        except Exception:
+            pass
+    try:
+        from .model_loader import _load_slot_model
+        tkey = e.get("tkey") or e.get("model_type") or "other"
+        folder = e.get("folder", "")
+        obj, actual, _note = _load_slot_model(tkey, folder, e.get("name", ""))
+        register(kind, e.get("name", ""), obj, model_type=actual, folder=folder, tkey=tkey)
+        return ("已重新加载 {}（{}）".format(label, _note)
+                if zh else "reloaded {} ({})".format(label, _note))
+    except Exception as exc:
+        return ("重新加载 {} 失败：{}".format(name, str(exc)[:80])
+                if zh else "reload {} failed: {}".format(name, str(exc)[:80]))
+
+
+def _do_unload_model(e, name, label, zh):
+    """彻底卸载：从显存卸载到 CPU，DynamicVRAM 模型再释放 CPU 内存。"""
+    kind = e["kind"]
+    patcher = e.get("patcher")
+    if patcher is None:
+        return ("{} 无可用模型对象".format(label) if zh else "{} no model object".format(label))
+    freed = fully_unload_patcher(patcher)
+    with _LOCK:
+        cur = _REGISTRY["models"].get(kind)
+        if cur is not None:
+            cur["state"] = residency(patcher)
+            cur["ts"] = _now()
+    if freed > 0:
+        return ("已彻底卸载 {}（显存+CPU内存）".format(label)
+                if zh else "fully unloaded {} (VRAM+RAM)".format(label))
+    return ("已卸载 {}（显存→CPU内存，传统模型无法释放内存）".format(label)
+            if zh else "unloaded {} (VRAM→RAM, legacy model keeps RAM)".format(label))
 
 
 def status_payload():
@@ -659,59 +748,46 @@ def register_routes():
 
 
 # ---------------------------------------------------------------------------
-# 节点2：模型占用检测（透传 + 空闲判定）
+# 节点2：模型加载开关（导线式信号检测 → 加载/卸载任务）
 # ---------------------------------------------------------------------------
 
-class ZouyuModelGuard(io.ComfyNode):
-    """模型占用检测：接在模型连线上，检测模型是否空闲并按低显存开关执行卸载策略。"""
+class ZouyuModelSwitch(io.ComfyNode):
+    """模型加载开关：左右各一个端口，信号直接透传，仅检测是否有数据经过。
+    一旦有信号经过，按『动作』开关向后端发送加载/卸载任务，由加载器完成并显示。"""
 
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="ZouyuModelGuard",
-            display_name="Zouyu 模型占用检测 (Model Guard)",
+            node_id="ZouyuModelSwitch",
+            display_name="模型加载开关 (Model Load Switch)",
             category="ZouyuAI/SeedTensor",
             description=(
-                "接在每个模型连线上（MODEL/CLIP/VAE 可同时接多个），当本节点执行时判定模型是否"
-                "空闲并按低显存开关执行卸载。『触发』输入（任意类型，可接 conditioning/采样结果等）"
-                "用于控制执行时机：例如接在文本编码节点之后、采样节点之前，即可在编码完成后立刻把"
-                "CLIP/VAE 彻底卸载，让采样模型独享显存；采样结束后解码节点会自动重新加载所需 VAE。"
-                "开关关闭则交由官方模型管理自动卸载到 CPU 内存。"
+                "导线式信号检测：左右各一个端口，信号直接透传，不做任何处理。"
+                "当有数据经过本节点时，按『动作』开关执行任务——打开（加载）：把下拉所选模型"
+                "加载进显存/CPU内存；关闭（卸载）：把该模型从显存与CPU内存彻底卸载。"
+                "下拉菜单只显示模型加载器中已配置好的模型（需先运行一次模型加载器登记配置）。"
+                "副标题实时显示当前动作（加载/卸载）。"
             ),
             inputs=[
-                io.Model.Input("model", optional=True, tooltip="视频模型（DiT）"),
-                io.Clip.Input("clip", optional=True, tooltip="文本编码器"),
-                io.Vae.Input("vae", optional=True, tooltip="视频 VAE"),
-                io.Vae.Input("audio_vae", optional=True, tooltip="音频 VAE"),
-                io.AnyType.Input("trigger", optional=True,
-                                 tooltip="触发（任意类型）：控制本节点执行时机，值会被忽略"),
+                io.AnyType.Input("signal", optional=True, tooltip="信号输入（任意类型，直接透传）"),
+                io.Combo.Input("model", options=configured_model_options(), default="(未选择)",
+                               tooltip="选择要控制的模型（模型加载器中已配置的槽位）"),
+                io.Boolean.Input("action", default=True, label_on="加载", label_off="卸载",
+                                 tooltip="加载=信号经过时把模型加载进显存；卸载=信号经过时从显存+CPU内存彻底卸载"),
                 io.Combo.Input("language", options=["中文", "English"], default="中文"),
             ],
             outputs=[
-                io.Model.Output(display_name="模型"),
-                io.Clip.Output(display_name="CLIP"),
-                io.Vae.Output(display_name="VAE"),
-                io.Vae.Output(display_name="音频VAE"),
-                io.String.Output(display_name="日志"),
+                io.AnyType.Output("signal", display_name="信号"),
             ],
         )
 
     @classmethod
-    def execute(cls, model=None, clip=None, vae=None, audio_vae=None, trigger=None,
-                language="中文") -> io.NodeOutput:
+    def execute(cls, signal=None, model="(未选择)", action=True, language="中文") -> io.NodeOutput:
         zh = (language != "English")
-        has_trigger = trigger is not None
-        lines = []
-        for kind, obj in (("unet", model), ("clip", clip), ("vae", vae), ("audio_vae", audio_vae)):
-            if obj is None:
-                continue
-            patcher = _patcher_of(obj)
-            msg, _st, _action = evaluate_idle(kind, patcher, zh, has_trigger=has_trigger)
+        if model and model != "(未选择)":
+            msg = load_or_unload_model(model, bool(action), zh)
             log_event(msg)
-            lines.append(msg)
-        if has_trigger and lines:
-            lines.insert(0, ("触发已就绪：当前阶段结束，执行空闲卸载策略" if zh
-                             else "trigger ready: phase done, applying idle policy"))
-        text = "\n".join(lines) if lines else (
-            "（未连接任何模型，仅透传）" if zh else "(no model connected, pass-through only)")
-        return io.NodeOutput(model, clip, vae, audio_vae, text, ui={"text": [text]})
+            text = msg
+        else:
+            text = ("未选择要控制的模型" if zh else "no model selected")
+        return io.NodeOutput(signal, ui={"text": [text]})

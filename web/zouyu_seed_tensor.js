@@ -80,7 +80,7 @@ const LABELS = {
   ref_images: { zh: "参考图", en: "Ref Images" },
   ref_videos: { zh: "参考视频", en: "Ref Videos" },
   ref_audio: { zh: "参考音频", en: "Ref Audio" },
-  // ---- 模型加载器 / 模型占用检测 ----
+  // ---- 模型加载器 / 模型加载开关 ----
   unet_folder: { zh: "UNET 文件夹", en: "UNET Folder" },
   unet_name: { zh: "UNET 模型", en: "UNET Model" },
   weight_dtype: { zh: "权重精度", en: "Weight Dtype" },
@@ -119,7 +119,7 @@ const TITLES = {
   ZouyuSeedPreview: { zh: "种子预览", en: "Seed Preview" },
   ZouyuClearTemp: { zh: "清空临时存储", en: "Clear Temp Storage" },
   ZouyuModelLoader: { zh: "Zouyu 模型加载器", en: "Zouyu Model Loader" },
-  ZouyuModelGuard: { zh: "Zouyu 模型占用检测", en: "Zouyu Model Guard" },
+  ZouyuModelSwitch: { zh: "模型加载开关", en: "Model Load Switch" },
 };
 
 const NODE_COLORS = {
@@ -131,7 +131,7 @@ const NODE_COLORS = {
   ZouyuSeedPreview: { color: "#b0722a", bgcolor: "#3a2812" },
   ZouyuClearTemp: { color: "#a03838", bgcolor: "#3a1616" },
   ZouyuModelLoader: { color: "#3d8b40", bgcolor: "#142b16" },
-  ZouyuModelGuard: { color: "#8a6d1f", bgcolor: "#2b2310" },
+  ZouyuModelSwitch: { color: "#8a6d1f", bgcolor: "#2b2310" },
 };
 
 // 参考端口槽位 label（V3 autogrow 嵌套名 ref_images.ref_image_0 -> 参考图 1）
@@ -473,7 +473,7 @@ function addButton(node, keyZh, keyEn, onClick) {
 }
 
 // ---------------------------------------------------------------------------
-// 模型加载器 / 模型占用检测：文件夹选择、文件刷新、红/绿/蓝状态灯
+// 模型加载器 / 模型加载开关：文件夹选择、文件刷新、红/绿/蓝状态灯 + 状态文字
 // ---------------------------------------------------------------------------
 
 const MAX_MODELS = 8;
@@ -484,16 +484,9 @@ const TYPE_CATEGORY = { 主模型: "diffusion_models", 文本模型: "text_encod
 const TYPE_PORT_NAMES = { main: "主模型", clip: "文本模型", vae: "视频VAE", avae: "音频VAE", lora: "lora", other: "其他" };
 const TYPE_PORT_NAMES_EN = { main: "Main", clip: "CLIP", vae: "VideoVAE", avae: "AudioVAE", lora: "lora", other: "other" };
 
-const KIND_NAMES = {
-  unet: { zh: "UNET 模型", en: "UNET Model" },
-  clip: { zh: "文本编码器", en: "CLIP" },
-  vae: { zh: "视频VAE", en: "Video VAE" },
-  audio_vae: { zh: "音频VAE", en: "Audio VAE" },
-};
-
 const STATE_INFO = {
-  gpu: { zh: "已加载(GPU)", en: "Loaded (GPU)", color: "#4caf50" },
-  cpu: { zh: "CPU缓存", en: "CPU cached", color: "#2196f3" },
+  gpu: { zh: "已加载", en: "Loaded", color: "#4caf50" },
+  cpu: { zh: "卸载至内存", en: "In RAM", color: "#2196f3" },
   free: { zh: "未加载", en: "Not loaded", color: "#f44336" },
   unknown: { zh: "未知", en: "Unknown", color: "#9e9e9e" },
 };
@@ -501,56 +494,6 @@ const STATE_INFO = {
 function stateText(state, lang) {
   const e = STATE_INFO[state] || STATE_INFO.unknown;
   return lang !== "English" ? e.zh : e.en;
-}
-
-const STATUS_STYLE = `
-.zouyu-status-block{padding:2px 4px;min-width:130px;margin-top:8px}
-.zouyu-status-block .zouyu-model-line{display:flex;align-items:center;gap:6px;font-size:12px;line-height:1.6}
-.zouyu-status-block .dot{width:10px;height:10px;border-radius:50%;flex:none;border:1px solid rgba(0,0,0,.4);box-shadow:0 0 4px rgba(0,0,0,.5)}
-.zouyu-status-block .zn{color:#e8e8e8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:190px}
-.zouyu-status-block .zt{color:#c9a05f;font-size:11px;flex:none}
-.zouyu-status-block .zs{color:#9a9a9a;font-size:11px;flex:none}
-.zouyu-gap{height:10px}
-.zouyu-slot-dot{display:flex;justify-content:flex-end;padding:2px 6px;min-height:16px}
-.zouyu-slot-dot .dot{width:10px;height:10px;border-radius:50%;display:inline-block;border:1px solid rgba(0,0,0,.4);box-shadow:0 0 4px rgba(0,0,0,.5)}
-`;
-
-let statusStylesInjected = false;
-
-function ensureStatusStyles() {
-  if (statusStylesInjected) return;
-  statusStylesInjected = true;
-  const el = document.createElement("style");
-  el.textContent = STATUS_STYLE;
-  document.head.appendChild(el);
-}
-
-function addDOMWidgetSafe(node, name, element) {
-  if (node.widgets?.find((w) => w.name === name)) return null;
-  try {
-    return node.addDOMWidget(name, "div", element, { serialize: false });
-  } catch (e) {
-    console.error("[ZouyuSeedTensor] addDOMWidget failed:", e);
-    return null;
-  }
-}
-
-function makeStatusBlock() {
-  const el = document.createElement("div");
-  el.className = "zouyu-status-block";
-  el.innerHTML = `
-    <div class="zouyu-model-line"><span class="dot"></span><span class="zn"></span><span class="zt"></span><span class="zs"></span></div>`;
-  return el;
-}
-
-function updateStatusBlock(el, info, lang) {
-  if (!el) return;
-  const zh = lang !== "English";
-  const st = STATE_INFO[info.state] || STATE_INFO.unknown;
-  el.querySelector(".dot").style.background = st.color;
-  el.querySelector(".zn").textContent = info.nameDisplay || "—";
-  el.querySelector(".zt").textContent = info.typeText || "";
-  el.querySelector(".zs").textContent = zh ? st.zh : st.en;
 }
 
 let statusNodes = new Set();
@@ -569,22 +512,19 @@ async function refreshStatusDOM(node) {
     for (const [kind, info] of Object.entries(node.__zouyuStatus)) {
       const m = byKind[kind];
       const st = STATE_INFO[m?.state || "unknown"];
-      if (info.dotOnly) {
-        // 行尾/画布三色灯：info.el 为 Vue 模式的灯元素，info.color 供两种模式使用
-        info.color = st.color;
-        if (info.el) info.el.style.background = st.color;
-        if (info.tag && m?.type) {
-          info.tag.textContent = zh ? m.type_zh : m.type_en;
-        }
-        continue;
+      // 行尾/画布：三色灯 + 状态文字（已加载/卸载至内存/未加载）
+      info.color = st.color;
+      info.state = m?.state || "unknown";
+      info.zh = st.zh;
+      info.en = st.en;
+      if (info.el) info.el.style.background = st.color;
+      if (info.textEl) info.textEl.textContent = zh ? st.zh : st.en;
+      if (info.tag && m?.type) {
+        info.tag.textContent = zh ? m.type_zh : m.type_en;
       }
-      const fname = info.fileWidget ? String(info.fileWidget.value || "").split(/[\\/]/).pop() : "";
-      const kindName = KIND_NAMES[kind] ? (zh ? KIND_NAMES[kind].zh : KIND_NAMES[kind].en) : kind;
-      updateStatusBlock(info.el, {
-        state: m?.state || "unknown",
-        typeText: m?.type ? (zh ? m.type_zh : m.type_en) : "",
-        nameDisplay: info.fileWidget ? (fname || "—") : kindName,
-      }, lang);
+    }
+    if (node.comfyClass === "ZouyuModelSwitch") {
+      // 开关节点的标题副文案由 action 决定，无需在此刷新；模型下拉由 loaders 执行事件刷新
     }
   } catch (e) {
     /* 服务端未就绪时忽略 */
@@ -615,6 +555,7 @@ const ZOUYU_OVERLAY_STYLE = `
 .zouyu-loader-overlay{position:absolute;inset:0;pointer-events:none;z-index:10}
 .zouyu-row-tail{position:absolute;right:20px;display:flex;align-items:center;gap:6px;pointer-events:none;transform:translateY(-50%)}
 .zouyu-rt-light{width:12px;height:12px;border-radius:50%;border:1px solid rgba(0,0,0,.45);box-shadow:0 0 4px rgba(0,0,0,.5);display:inline-block;background:#9e9e9e}
+.zouyu-rt-text{font-size:10px;line-height:14px;color:#9a9a9a;white-space:nowrap}
 .zouyu-rt-type{font-size:10px;line-height:14px;color:#c9a05f;background:rgba(0,0,0,.4);padding:0 4px;border-radius:3px;white-space:nowrap}
 .zouyu-rt-folder{font-size:11px;line-height:15px;border:none;background:rgba(0,0,0,.4);border-radius:3px;padding:0 4px;color:#ddd;cursor:pointer;pointer-events:auto}
 .zouyu-rt-folder:hover{background:rgba(0,0,0,.6)}
@@ -781,9 +722,13 @@ function updateRowTail(node, overlay, i, rowCY, visible, used, compact, zh) {
   }
   const light = document.createElement("span");
   light.className = "zouyu-rt-light";
-  light.title = zh ? "绿=已加载(GPU) 蓝=CPU缓存 红=未加载" : "Green=GPU Blue=CPU Red=Not loaded";
+  light.title = zh ? "绿=已加载(显存) 蓝=卸载至内存 红=未加载" : "Green=VRAM Blue=In RAM Red=Not loaded";
   tail.appendChild(light);
-  if (node.__zouyuStatus) node.__zouyuStatus[`slot${i}`] = { el: light, tag, dotOnly: true };
+  const textEl = document.createElement("span");
+  textEl.className = "zouyu-rt-text";
+  textEl.textContent = zh ? "未加载" : "Not loaded";
+  tail.appendChild(textEl);
+  if (node.__zouyuStatus) node.__zouyuStatus[`slot${i}`] = { el: light, textEl, tag, dotOnly: true };
 }
 
 /** 布局一次：端口点平移到下拉行 + 行尾灯/标签/📁 定位（节点 DOM 内，自动跟随节点）。 */
@@ -1115,7 +1060,7 @@ function layoutLegacyLoader(node) {
   }
 }
 
-/** 画布绘制：每行端口左侧画三色灯；常规模式画 📁，集成模式画类型标签。 */
+/** 画布绘制：每行端口左侧画三色灯 + 占用状态文字；常规模式画 📁，集成模式画类型标签。 */
 function drawLegacyOverlay(node, ctx) {
   const st = node.__zouyuSlotState;
   if (!st || !ctx) return;
@@ -1136,26 +1081,30 @@ function drawLegacyOverlay(node, ctx) {
     const color = (info && info.color) || "#9e9e9e";
     // 三色灯（下拉与端口之间）
     ctx.beginPath();
-    ctx.arc(W - 23, y, 6, 0, Math.PI * 2);
+    ctx.arc(W - 24, y, 6, 0, Math.PI * 2);
     ctx.fillStyle = color;
     ctx.fill();
     ctx.strokeStyle = "rgba(0,0,0,.5)";
     ctx.lineWidth = 1;
     ctx.stroke();
+    // 占用状态文字（灯光旁边）：已加载 / 卸载至内存 / 未加载
+    ctx.font = "10px sans-serif";
+    ctx.fillStyle = "#c8c8c8";
+    ctx.textAlign = "right";
+    const stateText2 = zh ? (info && info.zh) || "未知" : (info && info.en) || "Unknown";
+    ctx.fillText(stateText2, W - 37, y);
     if (compact) {
-      // 集成模式：类型只显示在端口旁
+      // 集成模式：类型标签显示在端口旁
       const tkey = TYPE_KEYS[s.type];
       const label = zh ? s.type : (TYPE_PORT_NAMES_EN[tkey] || s.type);
       ctx.font = "10px sans-serif";
       ctx.fillStyle = "#c9a05f";
-      ctx.textAlign = "right";
-      ctx.fillText(label, W - 35, y);
+      ctx.fillText(label, W - 92, y);
     } else {
       // 📁 选择文件夹按钮
       ctx.font = "12px sans-serif";
       ctx.fillStyle = "#d8d8d8";
-      ctx.textAlign = "right";
-      ctx.fillText("📁", W - 35, y);
+      ctx.fillText("📁", W - 55, y);
     }
     ctx.textAlign = "left";
   }
@@ -1175,7 +1124,7 @@ function legacyMouseDown(node, pos) {
     if (!s || s.type === "未使用") continue;
     const nameW = slotWidgets(node, i).name;
     const y = (nameW && nameW.y != null ? nameW.y : 0) + H / 2;
-    if (pos[0] >= W - 47 && pos[0] <= W - 25 && pos[1] >= y - 9 && pos[1] <= y + 9) {
+    if (pos[0] >= W - 72 && pos[0] <= W - 48 && pos[1] >= y - 9 && pos[1] <= y + 9) {
       pickSlotFolder(node, i);
       return true;
     }
@@ -1353,6 +1302,9 @@ function setupModelLoaderNode(node) {
   node.__zouyuSlotState = st;
   node.__zouyuLang = st.lang;
   node.__zouyuStatus = {};
+  // 加入 2.5s 状态轮询：开关节点卸载/加载后，无需加载器重跑即可刷新灯与文字
+  statusNodes.add(node);
+  startStatusPolling();
 
   // 挂接回调（包装原有回调，保证值仍然流向后端）
   for (let i = 0; i < MAX_MODELS; i++) {
@@ -1463,27 +1415,76 @@ function setupModelLoaderNode(node) {
 }
 
 
-function setupModelGuardNode(node) {
-  ensureStatusStyles();
-  node.__zouyuStatus = {};
+function setupModelSwitchNode(node) {
+  node.__zouyuLang = getLang();
   statusNodes.add(node);
   startStatusPolling();
 
-  const pairs = [
-    ["model", "unet"],
-    ["clip", "clip"],
-    ["vae", "vae"],
-    ["audio_vae", "audio_vae"],
-  ];
-  for (const [inpName, kind] of pairs) {
-    const inp = node.inputs?.find((i) => i.name === inpName);
-    if (!inp || inp.link == null) continue; // 只为已连接的模型亮灯
-    const el = makeStatusBlock();
-    addDOMWidgetSafe(node, "zouyu_guard_" + kind, el);
-    node.__zouyuStatus[kind] = { el, folderWidget: null, fileWidget: null };
+  // 『动作』开关 → 副标题实时显示 加载/卸载
+  const aw = node.widgets?.find((w) => w.name === "action");
+  if (aw) {
+    const orig = aw.callback;
+    aw.callback = (v) => {
+      if (orig) orig.call(aw, v);
+      applySwitchSubtitle(node);
+    };
   }
+  applySwitchSubtitle(node);
 
-  refreshStatusDOM(node);
+  // 模型下拉：只显示加载器中已配置的模型（美化标签），并在加载器执行后自动刷新
+  refreshSwitchModelCombo(node);
+  setTimeout(() => refreshSwitchModelCombo(node), 400);
+  setTimeout(() => refreshSwitchModelCombo(node), 1200);
+  // 工作流加载：控件值在 configure 后才恢复 → 延迟重读动作并更新副标题
+  setTimeout(() => applySwitchSubtitle(node), 150);
+  setTimeout(() => applySwitchSubtitle(node), 600);
+}
+
+/** 开关副标题：加载 / 卸载。 */
+function applySwitchSubtitle(node) {
+  if (!node) return;
+  const zh = node.__zouyuLang !== "English";
+  const aw = node.widgets?.find((w) => w.name === "action");
+  const on = !!(aw && aw.value);
+  const base = zh ? "模型加载开关" : "Model Load Switch";
+  node.title = base + (on ? (zh ? " · 加载" : " · Load") : (zh ? " · 卸载" : " · Unload"));
+  app.graph?.setDirtyCanvas(true, true);
+}
+
+/** 开关模型下拉：从 /status 拉取已配置模型（只显示 slot 槽位）。 */
+async function refreshSwitchModelCombo(node) {
+  if (!node) return;
+  const w = node.widgets?.find((x) => x.name === "model");
+  if (!w) return;
+  try {
+    const r = await fetch("/zouyu_model_loader/status");
+    if (!r.ok) return;
+    const payload = await r.json();
+    const zh = node.__zouyuLang !== "English";
+    const items = (payload.models || [])
+      .filter((m) => String(m.kind || "").startsWith("slot"))
+      .map((m) => ({ value: m.kind, label: (zh ? m.label_zh : m.label_en) + " · " + m.name }));
+    w.options = w.options || {};
+    const values = ["(未选择)", ...items.map((i) => i.value)];
+    if (!w.options.values || w.options.values.join("|") !== values.join("|")) {
+      w.options.values = values;
+    }
+    w.options.getOptionLabel = (v) => {
+      const it = items.find((i) => i.value === v);
+      return it ? it.label : v;
+    };
+    app.graph?.setDirtyCanvas(true, true);
+  } catch (e) {
+    /* 服务端未就绪时忽略 */
+  }
+}
+
+/** 刷新图中所有开关节点的模型下拉（加载器执行后调用）。 */
+function refreshAllSwitchCombos() {
+  const nodes = app.graph?._nodes || [];
+  for (const n of nodes) {
+    if ((n.comfyClass || n.type) === "ZouyuModelSwitch") refreshSwitchModelCombo(n);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1502,7 +1503,7 @@ app.registerExtension({
       const r = origOnConnectionsChange?.apply(this, arguments);
       try {
         applyLanguage(this, this.__zouyuLang || getLang());
-        if (this.comfyClass === "ZouyuModelGuard") setupModelGuardNode(this);
+        if (this.comfyClass === "ZouyuModelSwitch") applySwitchSubtitle(this);
       } catch (e) {
         console.error("[ZouyuSeedTensor] i18n refresh error:", e);
       }
@@ -1539,8 +1540,8 @@ app.registerExtension({
           setupModelLoaderNode(node);
         }
 
-        if (comfyClass === "ZouyuModelGuard") {
-          setupModelGuardNode(node);
+        if (comfyClass === "ZouyuModelSwitch") {
+          setupModelSwitchNode(node);
         }
 
         const langWidget = node.widgets?.find((w) => w.name === "language");
@@ -1588,15 +1589,19 @@ api.addEventListener("Zouyu-seed-files-refresh", () => {
   refreshAllFileCombos();
 });
 
-// 模型加载器/占用检测执行完成后立即刷新状态灯（兜底：另有 2.5s 轮询）
+// 模型加载器/开关执行完成后立即刷新状态灯与开关下拉（兜底：另有 2.5s 轮询）
 api.addEventListener("executed", (event) => {
   try {
     const detail = event.detail;
     if (!detail || detail.nodeId == null) return;
     const node = app.graph?._nodes?.find((n) => String(n.id) === String(detail.nodeId));
     if (!node) return;
-    if (node.comfyClass === "ZouyuModelLoader" || node.comfyClass === "ZouyuModelGuard") {
+    if (node.comfyClass === "ZouyuModelLoader") {
       refreshStatusDOM(node);
+      // 加载器执行后：登记了新配置 → 刷新所有开关节点的模型下拉
+      refreshAllSwitchCombos();
+    } else if (node.comfyClass === "ZouyuModelSwitch") {
+      refreshSwitchModelCombo(node);
     }
   } catch (e) {
     /* ignore */

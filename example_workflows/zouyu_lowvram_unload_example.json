@@ -42,7 +42,7 @@
         { "name": "language", "type": "COMBO", "link": null, "widget": { "name": "language" } }
       ],
       "outputs": [
-        { "name": "主模型0", "type": "*", "links": [1, 5, 15] },
+        { "name": "主模型0", "type": "*", "links": [1, 5] },
         { "name": "文本模型0", "type": "*", "links": [2, 6] },
         { "name": "视频VAE0", "type": "*", "links": [3, 7, 18] },
         { "name": "音频VAE0", "type": "*", "links": [4, 8, 19] },
@@ -104,30 +104,24 @@
     },
     {
       "id": 3,
-      "type": "ZouyuModelGuard",
+      "type": "ZouyuModelSwitch",
       "pos": [-680, 440],
-      "size": [360, 170],
+      "size": [360, 120],
       "flags": {},
       "order": 3,
       "mode": 0,
       "inputs": [
-        { "name": "model", "type": "MODEL", "link": null },
-        { "name": "clip", "type": "CLIP", "link": 6 },
-        { "name": "vae", "type": "VAE", "link": 7 },
-        { "name": "audio_vae", "type": "VAE", "link": 8 },
-        { "name": "trigger", "type": "*", "link": 9 },
+        { "name": "signal", "type": "*", "link": 9 },
+        { "name": "model", "type": "COMBO", "link": null, "widget": { "name": "model" } },
+        { "name": "action", "type": "BOOLEAN", "link": null, "widget": { "name": "action" } },
         { "name": "language", "type": "COMBO", "link": null, "widget": { "name": "language" } }
       ],
       "outputs": [
-        { "name": "模型", "type": "MODEL", "links": [] },
-        { "name": "CLIP", "type": "CLIP", "links": [] },
-        { "name": "VAE", "type": "VAE", "links": [] },
-        { "name": "音频VAE", "type": "VAE", "links": [] },
-        { "name": "日志", "type": "STRING", "links": [] }
+        { "name": "signal", "type": "*", "links": [] }
       ],
-      "title": "Zouyu 占用检测①（编码后卸载 CLIP/VAE）",
-      "properties": { "Node name for S&R": "ZouyuModelGuard" },
-      "widgets_values": ["中文"]
+      "title": "加载开关①（编码后卸载文本模型）",
+      "properties": { "Node name for S&R": "ZouyuModelSwitch" },
+      "widgets_values": ["slot1", false, "中文"]
     },
     {
       "id": 4,
@@ -211,30 +205,24 @@
     },
     {
       "id": 8,
-      "type": "ZouyuModelGuard",
+      "type": "ZouyuModelSwitch",
       "pos": [620, 40],
-      "size": [360, 150],
+      "size": [360, 120],
       "flags": {},
       "order": 8,
       "mode": 0,
       "inputs": [
-        { "name": "model", "type": "MODEL", "link": 15 },
-        { "name": "clip", "type": "CLIP", "link": null },
-        { "name": "vae", "type": "VAE", "link": null },
-        { "name": "audio_vae", "type": "VAE", "link": null },
-        { "name": "trigger", "type": "*", "link": 16 },
+        { "name": "signal", "type": "*", "link": 16 },
+        { "name": "model", "type": "COMBO", "link": null, "widget": { "name": "model" } },
+        { "name": "action", "type": "BOOLEAN", "link": null, "widget": { "name": "action" } },
         { "name": "language", "type": "COMBO", "link": null, "widget": { "name": "language" } }
       ],
       "outputs": [
-        { "name": "模型", "type": "MODEL", "links": [] },
-        { "name": "CLIP", "type": "CLIP", "links": [] },
-        { "name": "VAE", "type": "VAE", "links": [] },
-        { "name": "音频VAE", "type": "VAE", "links": [] },
-        { "name": "日志", "type": "STRING", "links": [] }
+        { "name": "signal", "type": "*", "links": [] }
       ],
-      "title": "Zouyu 占用检测②（采样后卸载 DiT）",
-      "properties": { "Node name for S&R": "ZouyuModelGuard" },
-      "widgets_values": ["中文"]
+      "title": "加载开关②（采样后卸载主模型）",
+      "properties": { "Node name for S&R": "ZouyuModelSwitch" },
+      "widgets_values": ["slot0", false, "中文"]
     },
     {
       "id": 9,
@@ -300,17 +288,13 @@
     [3, 1, 2, 2, 2, "VAE"],
     [4, 1, 3, 2, 3, "VAE"],
     [5, 1, 0, 6, 0, "MODEL"],
-    [6, 1, 1, 3, 1, "CLIP"],
-    [7, 1, 2, 3, 2, "VAE"],
-    [8, 1, 3, 3, 3, "VAE"],
-    [9, 2, 0, 3, 4, "CONDITIONING"],
+    [9, 2, 0, 3, 0, "CONDITIONING"],
     [10, 2, 1, 7, 1, "GUIDER"],
     [11, 2, 2, 7, 4, "LATENT"],
     [12, 4, 0, 7, 0, "NOISE"],
     [13, 5, 0, 7, 2, "SAMPLER"],
     [14, 6, 0, 7, 3, "SIGMAS"],
-    [15, 1, 0, 8, 0, "MODEL"],
-    [16, 7, 0, 8, 4, "LATENT"],
+    [16, 7, 0, 8, 0, "LATENT"],
     [17, 7, 0, 9, 0, "LATENT"],
     [18, 1, 2, 9, 1, "VAE"],
     [19, 1, 3, 9, 2, "VAE"],
@@ -335,7 +319,7 @@
     },
     {
       "id": 3,
-      "title": "占用检测①：编码后确认 CLIP/VAE 已彻底卸载（红）",
+      "title": "加载开关①：编码后信号经过 → 卸载文本模型（红）",
       "bounding": [-700, 420, 380, 190],
       "color": "#b58",
       "flags": {}
@@ -365,7 +349,7 @@
   "config": {},
   "extra": {
     "frontendVersion": "1.23.0",
-    "note": "低显存自动卸载示例（沿用示例工作流布局）：① ZouyuModelLoader 开启『低显存模式』并对四个模型挂载状态回调——任何模型被官方管理卸载时立即释放其 CPU 内存（DynamicVRAM），状态灯实时变红；② 融合加载器编码后自动卸载 CLIP/VAE、加载 DiT；③ 占用检测①（trigger=张量输出）确认 CLIP/VAE 已彻底卸载（红）；④ 采样阶段 DiT 独享显存；⑤ 占用检测②（trigger=采样输出）卸载 DiT；⑥ 解码节点按需自动重新加载 VAE 工作。"
+    "note": "低显存自动卸载示例：① ZouyuModelLoader 开启『低显存模式』并对四个模型挂载状态回调——任何模型被官方管理卸载时立即释放其 CPU 内存（DynamicVRAM），加载器中的三色灯+状态文字实时更新（绿=已加载/蓝=卸载至内存/红=未加载）；② 融合加载器编码后自动卸载 CLIP/VAE、加载 DiT；③ 模型加载开关①（信号=编码输出，动作=卸载）→ 编码完成时彻底卸载文本模型；④ 采样阶段 DiT 独享显存；⑤ 模型加载开关②（信号=采样输出，动作=卸载）→ 采样完成时彻底卸载主模型；⑥ 解码节点按需自动重新加载 VAE 工作。"
   },
   "version": 0.4
 }
