@@ -48,6 +48,17 @@ _WATCHED_TTL = 3600.0
 
 KIND_LABELS = {"unet": "UNET", "clip": "CLIP", "vae": "视频VAE", "audio_vae": "音频VAE"}
 
+KIND_LABELS_EN = {"unet": "UNET", "clip": "CLIP", "vae": "Video VAE", "audio_vae": "Audio VAE"}
+
+SLOT_TYPE_LABELS = {
+    "main":  {"zh": "主模型",  "en": "Main"},
+    "clip":  {"zh": "文本模型", "en": "Text(CLIP)"},
+    "vae":   {"zh": "视频VAE", "en": "Video VAE"},
+    "avae":  {"zh": "音频VAE", "en": "Audio VAE"},
+    "lora":  {"zh": "LoRA",    "en": "LoRA"},
+    "other": {"zh": "其他",    "en": "Other"},
+}
+
 STATE_INFO = {
     "gpu":     {"zh": "已加载(GPU)", "en": "Loaded (GPU)", "color": "#4caf50"},
     "cpu":     {"zh": "CPU缓存",     "en": "CPU cached",   "color": "#2196f3"},
@@ -186,6 +197,11 @@ def watch(kind, patcher):
         if kind in _REGISTRY["models"] and _REGISTRY["models"][kind]["patcher"] is patcher:
             _REGISTRY["models"][kind]["state"] = residency(patcher)
             _REGISTRY["models"][kind]["ts"] = _now()
+        # 通用：按 patcher 匹配更新所有条目（通用加载器的槽位条目 kind 为 slot{i}）
+        for k, e in _REGISTRY["models"].items():
+            if k != kind and e.get("patcher") is patcher:
+                e["state"] = residency(patcher)
+                e["ts"] = _now()
     _attach_model_callbacks(patcher, kind)
     return ever_loaded
 
@@ -275,9 +291,18 @@ def status_payload():
             info = STATE_INFO.get(st, STATE_INFO["unknown"])
             mtype = e.get("model_type", "")
             tinfo = MODEL_TYPE_INFO.get(mtype, MODEL_TYPE_INFO["unknown"]) if mtype else None
+            # 标签：通用加载器槽位 → 类型+序号；经典 kind → KIND_LABELS
+            if kind.startswith("slot") and mtype in SLOT_TYPE_LABELS:
+                label_zh = SLOT_TYPE_LABELS[mtype]["zh"] + kind[len("slot"):]
+                label_en = SLOT_TYPE_LABELS[mtype]["en"] + kind[len("slot"):]
+            else:
+                label_zh = KIND_LABELS.get(kind, kind)
+                label_en = KIND_LABELS_EN.get(kind, kind)
             models.append({
                 "kind": kind,
-                "label": KIND_LABELS.get(kind, kind),
+                "label": label_zh,
+                "label_zh": label_zh,
+                "label_en": label_en,
                 "name": e.get("name", ""),
                 "state": st,
                 "color": info["color"],
