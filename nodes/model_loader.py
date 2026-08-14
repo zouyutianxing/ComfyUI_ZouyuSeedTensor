@@ -179,8 +179,10 @@ class ZouyuModelLoader(io.ComfyNode):
                                optional=True, tooltip="模型类型（未使用=该槽位空置）"),
                 io.String.Input("model_{}_folder".format(i), default="", optional=True,
                                 tooltip="模型文件夹（相对 models 目录，可留空=按类型默认）"),
-                io.Combo.Input("model_{}_name".format(i), options=["(未选择)"], default="(未选择)",
-                               optional=True, tooltip="模型文件"),
+                # 文件用 STRING：前端动态渲染为下拉；STRING 不受后端选项列表校验限制，
+                # 避免"文件不在静态选项列表"的校验错误
+                io.String.Input("model_{}_name".format(i), default="(未选择)", optional=True,
+                                tooltip="模型文件"),
             ])
         inputs.extend([
             io.Boolean.Input("compact_mode", default=False, label_on="集成", label_off="展开",
@@ -223,6 +225,7 @@ class ZouyuModelLoader(io.ComfyNode):
                 slots.append((i, t, folder, name))
 
         loaded = [None] * MAX_MODELS
+        actual_keys = {}
         notes = []
         for i, t, folder, name in slots:
             tkey = TYPE_KEY.get(t, "other")
@@ -239,18 +242,19 @@ class ZouyuModelLoader(io.ComfyNode):
                     raise ValueError("[ZouyuModelLoader] {}槽位没有可用模型文件: {}".format(
                         TYPE_LABELS.get(tkey, {}).get("zh", t), exc2)) from exc2
             loaded[i] = obj
+            actual_keys[i] = actual_key
             if note:
                 notes.append(note)
             tlabel = TYPE_LABELS.get(actual_key, TYPE_LABELS["other"])
             log_event("槽位{}：{} ← {}（{}）".format(i, tlabel["zh"], os.path.basename(name), note or "正常"))
 
-        # 登记（按槽位 + 类型），供状态灯/guard 使用
+        # 登记（按槽位 + 实际识别类型），供状态灯/guard 使用
         for i, t, folder, name in slots:
             obj = loaded[i]
             if obj is None:
                 continue
-            tkey = TYPE_KEY.get(t, "other")
-            register("slot{}".format(i), os.path.basename(name), obj, model_type=tkey)
+            register("slot{}".format(i), os.path.basename(name), obj,
+                     model_type=actual_keys.get(i, TYPE_KEY.get(t, "other")))
 
         # 消费节点2（ZouyuModelGuard）传来的闲置信号
         for kind, st, _ts in consume_signals():

@@ -770,59 +770,69 @@ function syncLoaderOutputs(node) {
 function rebuildLoaderWidgets(node) {
   const st = node.__zouyuSlotState;
   if (!st) return;
-  const zh = st.lang !== "English";
-  const compact = !!st.compact;
-  const count = computeVisibleCount(st);
-  node.widgets = [];
-  node.__zouyuStatus = {};
-  for (let i = 0; i < count; i++) {
-    const s = st.slots[i] || (st.slots[i] = { type: "未使用", folder: "", name: "(未选择)", files: [] });
-    const used = s.type !== "未使用";
-    const typeW = addComboWidget(node, `model_${i}_type`, s.type, MODEL_TYPE_OPTIONS, (v) => onSlotTypeChange(node, i, v));
-    typeW.options.getOptionLabel = (v) => {
-      if (v === "未使用") return zh ? "请选择模型类型" : "Select Model Type";
-      return zh ? v : (TYPE_EN[v] || v);
-    };
-    typeW.label = zh ? `模型 ${i}` : `Model ${i}`;
-    if (used) {
-      if (!compact) {
+  try {
+    const zh = st.lang !== "English";
+    const compact = !!st.compact;
+    const count = computeVisibleCount(st);
+    node.widgets = [];
+    node.__zouyuStatus = {};
+    for (let i = 0; i < count; i++) {
+      const s = st.slots[i] || (st.slots[i] = { type: "未使用", folder: "", name: "(未选择)", files: [] });
+      const used = s.type !== "未使用";
+      const typeW = addComboWidget(node, `model_${i}_type`, s.type, MODEL_TYPE_OPTIONS, (v) => onSlotTypeChange(node, i, v));
+      typeW.options.getOptionLabel = (v) => {
+        if (v === "未使用") return zh ? "请选择模型类型" : "Select Model Type";
+        return zh ? v : (TYPE_EN[v] || v);
+      };
+      typeW.label = zh ? `模型 ${i}` : `Model ${i}`;
+      if (used) {
+        // 文件夹控件始终保留（保证 widget 顺序与 schema 一致、保存值不串位）；
+        // 集成模式下用 hidden 隐藏（新前端若忽略 hidden 则仍显示，但功能不受影响）
         const folderW = addStringWidget(node, `model_${i}_folder`, s.folder, (v) => { s.folder = v; refreshSlotFiles(node, i); });
         folderW.label = zh ? "文件夹" : "Folder";
-        const btn = node.addWidget("button", "📁", null, () => pickSlotFolder(node, i));
-        btn.serialize = false;
-        btn.title = zh ? "选择模型文件夹" : "Choose model folder";
+        folderW.hidden = !!compact;
+        if (!compact) {
+          const btn = node.addWidget("button", "📁", null, () => pickSlotFolder(node, i));
+          btn.serialize = false;
+          btn.title = zh ? "选择模型文件夹" : "Choose model folder";
+        }
+        const nameW = addComboWidget(node, `model_${i}_name`, s.name, s.files.length ? s.files : ["(未选择)"], (v) => onSlotNameChange(node, i, v));
+        nameW.label = zh ? "模型文件" : "Model file";
+      } else {
+        const folderW = addStringWidget(node, `model_${i}_folder`, s.folder, null);
+        folderW.label = zh ? "文件夹" : "Folder";
+        folderW.hidden = true;
+        const nameW = addComboWidget(node, `model_${i}_name`, "(未选择)", ["(未选择)"], null);
+        nameW.label = zh ? "模型文件" : "Model file";
       }
-      const nameW = addComboWidget(node, `model_${i}_name`, s.name, s.files.length ? s.files : ["(未选择)"], (v) => onSlotNameChange(node, i, v));
-      nameW.label = zh ? "模型文件" : "Model file";
-    } else {
-      const nameW = addComboWidget(node, `model_${i}_name`, "(未选择)", ["(未选择)"], null);
-      nameW.label = zh ? "模型文件" : "Model file";
+      // 三色状态灯：放在文件下拉之后（端口旁，位于端口与下拉之间）
+      const dotEl = makeSlotDot(i);
+      addDOMWidgetSafe(node, `zouyu_slot_dot_${i}`, dotEl);
+      node.__zouyuStatus[`slot${i}`] = { el: dotEl, dotOnly: true };
+      if (i > 0) {
+        const rm = node.addWidget("button", zh ? "− 移除" : "− Remove", null, () => removeSlot(node, i));
+        rm.serialize = false;
+      }
     }
-    // 三色状态灯：放在文件下拉之后（端口旁，位于端口与下拉之间）
-    const dotEl = makeSlotDot(i);
-    addDOMWidgetSafe(node, `zouyu_slot_dot_${i}`, dotEl);
-    node.__zouyuStatus[`slot${i}`] = { el: dotEl, dotOnly: true };
-    if (i > 0) {
-      const rm = node.addWidget("button", zh ? "− 移除" : "− Remove", null, () => removeSlot(node, i));
-      rm.serialize = false;
-    }
+    // 底部：集成模式 / 低显存模式 / 界面语言
+    const compactW = addToggleWidget(node, "compact_mode", !!st.compact, (v) => { st.compact = v; rebuildLoaderWidgets(node); }, zh ? "集成" : "Compact", zh ? "展开" : "Full");
+    compactW.label = zh ? "集成模式" : "Compact";
+    const lowW = addToggleWidget(node, "low_vram_mode", !!st.lowVram, (v) => { st.lowVram = v; }, zh ? "彻底卸载" : "Full unload", zh ? "CPU缓存" : "CPU cache");
+    lowW.label = zh ? "低显存模式" : "Low VRAM";
+    const langW = addComboWidget(node, "language", st.lang, ["中文", "English"], (v) => {
+      st.lang = v;
+      setLang(v);
+      node.__zouyuLang = v;
+      applyLanguage(node, v);
+      rebuildLoaderWidgets(node);
+    });
+    langW.label = zh ? "界面语言" : "Language";
+    syncLoaderOutputs(node);
+    refreshStatusDOM(node);
+    app.graph?.setDirtyCanvas(true, false);
+  } catch (e) {
+    console.error("[ZouyuSeedTensor] 重建加载器控件失败:", e);
   }
-  // 底部：集成模式 / 低显存模式 / 界面语言
-  const compactW = addToggleWidget(node, "compact_mode", !!st.compact, (v) => { st.compact = v; rebuildLoaderWidgets(node); }, zh ? "集成" : "Compact", zh ? "展开" : "Full");
-  compactW.label = zh ? "集成模式" : "Compact";
-  const lowW = addToggleWidget(node, "low_vram_mode", !!st.lowVram, (v) => { st.lowVram = v; }, zh ? "彻底卸载" : "Full unload", zh ? "CPU缓存" : "CPU cache");
-  lowW.label = zh ? "低显存模式" : "Low VRAM";
-  const langW = addComboWidget(node, "language", st.lang, ["中文", "English"], (v) => {
-    st.lang = v;
-    setLang(v);
-    node.__zouyuLang = v;
-    applyLanguage(node, v);
-    rebuildLoaderWidgets(node);
-  });
-  langW.label = zh ? "界面语言" : "Language";
-  syncLoaderOutputs(node);
-  refreshStatusDOM(node);
-  app.graph?.setDirtyCanvas(true, false);
 }
 
 function setupModelLoaderNode(node) {
@@ -851,6 +861,17 @@ function setupModelLoaderNode(node) {
     const s = st.slots[i];
     if (s.type && s.type !== "未使用") refreshSlotFiles(node, Number(i));
   }
+  // 延时重同步：防止框架在 onNodeCreated 之后重建 schema 控件覆盖我们的列表
+  setTimeout(() => {
+    try {
+      if (node.__zouyuSlotState && node.widgets && node.widgets.length > 0
+          && node.widgets[0] && node.widgets[0].name === "model_0_type") {
+        // 已是重建后的列表，无需处理
+        return;
+      }
+      rebuildLoaderWidgets(node);
+    } catch (e) { /* ignore */ }
+  }, 150);
 }
 
 function setupModelGuardNode(node) {
