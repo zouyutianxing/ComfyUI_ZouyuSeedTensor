@@ -623,7 +623,8 @@ async function refreshModelFiles(category, folder, fileWidget) {
  * 「选择模型文件夹」：直接调用系统原生文件夹选择对话框（Chrome/Edge 的
  * showDirectoryPicker，即操作系统资源管理器对话框，不在 ComfyUI 内弹窗）。
  * 选择后按文件夹名在 models 目录树中定位（不限制分类），自动更新文件夹显示
- * 并刷新模型下拉；找不到/重名时给出提示，可手动在文件夹输入框中精确填写。
+ * 并刷新模型下拉；取消/关闭对话框一律静默返回（不弹提示、不打开资源管理器）。
+ * 浏览器不支持原生目录选择时同样静默返回，用户可直接在文件夹输入框中手动填写路径。
  */
 async function pickModelFolder(node, category, folderWidget, fileWidget) {
   let folderName = null;
@@ -632,39 +633,31 @@ async function pickModelFolder(node, category, folderWidget, fileWidget) {
       const handle = await window.showDirectoryPicker();
       folderName = handle?.name || null;
     } catch (e) {
-      if (e && e.name === "AbortError") return; // 用户取消
+      return; // 取消或不可用 → 静默
     }
-  }
-  if (!folderName) {
-    // 兜底：webkitdirectory 原生目录选择
+  } else {
+    // 兜底：webkitdirectory 原生目录选择（取消同样静默）
     folderName = await new Promise((resolve) => {
       const input = document.createElement("input");
       input.type = "file";
       input.webkitdirectory = true;
       input.style.display = "none";
       document.body.appendChild(input);
+      let done = false;
+      const finish = (v) => {
+        if (done) return;
+        done = true;
+        input.remove();
+        resolve(v);
+      };
       input.onchange = () => {
         const f = input.files?.[0];
-        resolve(f?.webkitRelativePath?.split("/")[0] || null);
-        input.remove();
+        finish(f?.webkitRelativePath ? f.webkitRelativePath.split("/")[0] : null);
       };
-      input.oncancel = () => {
-        input.remove();
-        resolve(null);
-      };
+      input.oncancel = () => finish(null);
       input.click();
     });
-  }
-  if (!folderName) {
-    // 浏览器不支持原生目录选择：直接在系统资源管理器中打开 models 目录
-    try {
-      const st = await (await fetch("/zouyu_model_loader/status")).json();
-      if (st?.models_root) {
-        await fetch(`/zouyu_model_loader/reveal?path=${encodeURIComponent(st.models_root)}`);
-      }
-    } catch (e) { /* ignore */ }
-    alert("[Zouyu] 当前浏览器不支持原生文件夹选择，已打开 models 目录，请在文件夹输入框中手动填写路径");
-    return;
+    if (!folderName) return; // 取消或浏览器无目录选择 → 静默
   }
   try {
     const d = await fetchJson(`/zouyu_model_loader/find_folder?name=${encodeURIComponent(folderName)}`);
