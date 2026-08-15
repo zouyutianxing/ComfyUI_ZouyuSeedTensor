@@ -667,14 +667,14 @@ function slotWidgets(node, i) {
   };
 }
 
-/** 可见槽位数：0..最后已填槽位+1（选好模型后自动弹出下一个，最多 8 个）。 */
+/** 可见槽位数：0..最后已填槽位+1（选好模型后自动弹出下一个，最多 8 个）。
+ *  「已填」= 已选模型文件 且 槽位类型不是「未使用」（旧工作流残留值不算，防止全部显示）。 */
 function visibleSlotCount(st) {
   let lastFilled = -1;
   for (let i = 0; i < MAX_MODELS; i++) {
     const s = st.slots[i];
     if (!s) continue;
-    const filled = !!s.name && s.name !== "(未选择)" && s.name !== "(无文件)";
-    // 类型为「其他」= 自动识别，恒视为已设置；只要选了文件即算已用
+    const filled = !!s.name && s.name !== "(未选择)" && s.name !== "(无文件)" && s.type !== "未使用";
     if (filled) lastFilled = i;
   }
   return Math.min(Math.max(lastFilled + 2, 1), MAX_MODELS);
@@ -701,7 +701,8 @@ async function refreshSlotFileOptions(node, i) {
     );
     s.files = (d.files || []).length ? d.files : [];
     w.options = w.options || {};
-    w.options.values = s.files.length ? s.files : ["(未选择)"];
+    // 选项始终包含「(未选择)」占位符，避免下拉当前值不在选项中而被框架自动改成第一个模型
+    w.options.values = ["(未选择)", ...(s.files.length ? s.files : [])];
     // 未选择（占位符）保持不动，避免把下拉自动填成第一个文件；
     // 只有当前值已失效时才回退到第一个可用文件
     if (w.value !== "(未选择)" && w.value !== "(无文件)" && !s.files.includes(w.value)) {
@@ -773,7 +774,7 @@ function updateRowTail(node, overlay, i, rowCY, visible, zh) {
   tail.innerHTML = "";
   const st2 = node.__zouyuSlotState;
   const s = st2 && st2.slots[i];
-  const filled = !!(s && s.name && s.name !== "(未选择)" && s.name !== "(无文件)");
+  const filled = !!(s && s.name && s.name !== "(未选择)" && s.name !== "(无文件)" && s.type !== "未使用");
   const info = node.__zouyuStatus && node.__zouyuStatus[`slot${i}`];
   const stInfo = filled ? (STATE_INFO[(info && info.state) || "unknown"] || STATE_INFO.unknown) : null;
   const light = document.createElement("span");
@@ -794,12 +795,12 @@ function updateRowTail(node, overlay, i, rowCY, visible, zh) {
 function updateRowButtons(node, overlay, i, rowCY, visible, zh) {
   const st = node.__zouyuSlotState;
   const s = st && st.slots[i];
-  const filled = !!(s && s.name && s.name !== "(未选择)" && s.name !== "(无文件)");
+  const filled = !!(s && s.name && s.name !== "(未选择)" && s.name !== "(无文件)" && s.type !== "未使用");
   // 至少选过一个模型、且精简显示开关打开时，所有可见下拉都显示按钮（与 applySlotVisibility 一致）
   let anyFilled = false;
   for (let j = 0; j < MAX_MODELS; j++) {
     const sj = st && st.slots[j];
-    if (sj && sj.name && sj.name !== "(未选择)" && sj.name !== "(无文件)") { anyFilled = true; break; }
+    if (sj && sj.name && sj.name !== "(未选择)" && sj.name !== "(无文件)" && sj.type !== "未使用") { anyFilled = true; break; }
   }
   const showBtn = visible && (filled || anyFilled) && !!st.compactView;
   let bar = overlay.querySelector(`[data-zouyu-btns="${i}"]`);
@@ -1098,11 +1099,19 @@ function syncStateFromWidgets(node) {
   if (!st) return;
   for (let i = 0; i < MAX_MODELS; i++) {
     const w = slotWidgets(node, i);
-    // 类型默认「其他」= 自动识别；旧工作流中用户明确选过类型则尊重（向后兼容）
+    // 类型：「未使用」=空槽位（即使 name 有残留值也不显示/不加载，兼容旧工作流）；
+    // 其它明确类型或「其他」（自动识别）视为已启用；旧工作流中用户明确选过类型则尊重
     const tv = w.type?.value;
-    st.slots[i].type = (tv && tv !== "未使用") ? tv : "其他";
+    st.slots[i].type = (tv === "未使用") ? "未使用" : ((tv && tv !== "未使用") ? tv : "其他");
     st.slots[i].folder = w.folder?.value || "";
     st.slots[i].name = w.name?.value || "(未选择)";
+    // 「未使用」槽位强制清空残留 name（旧工作流曾被自动填充的模型名），
+    // 确保这类槽位既不显示也不参与加载
+    if (st.slots[i].type === "未使用") {
+      st.slots[i].name = "(未选择)";
+      st.slots[i].folder = "";
+      if (w.name && w.name.value !== "(未选择)") w.name.value = "(未选择)";
+    }
   }
   st.lowVram = !!node.widgets?.find((w) => w.name === "low_vram_mode")?.value;
   st.compactView = !!node.widgets?.find((w) => w.name === "compact_view")?.value;
@@ -1198,7 +1207,7 @@ function drawLegacyOverlay(node, ctx) {
     if (!s) continue;
     const nameW = slotWidgets(node, i).name;
     const y = slotRowCenterY(nameW, H);
-    const filled = !!s.name && s.name !== "(未选择)" && s.name !== "(无文件)";
+    const filled = !!s.name && s.name !== "(未选择)" && s.name !== "(无文件)" && s.type !== "未使用";
     const info = node.__zouyuStatus && node.__zouyuStatus[`slot${i}`];
     let color, text;
     if (!filled) {
@@ -1285,7 +1294,7 @@ function applySlotVisibility(node) {
   let anyFilled = false;
   for (let j = 0; j < MAX_MODELS; j++) {
     const sj = st.slots[j];
-    if (sj && sj.name && sj.name !== "(未选择)" && sj.name !== "(无文件)") { anyFilled = true; break; }
+    if (sj && sj.name && sj.name !== "(未选择)" && sj.name !== "(无文件)" && sj.type !== "未使用") { anyFilled = true; break; }
   }
   // 精简显示开关：关闭（简洁）= 隐藏文件夹/加载按钮与导入条，只保留下拉/灯/提示/端口/低显存/语言/本开关
   const showActions = !!st.compactView;
@@ -1293,7 +1302,12 @@ function applySlotVisibility(node) {
     const w = slotWidgets(node, i);
     const visible = i < count;
     const s = st.slots[i] || (st.slots[i] = { type: "其他", folder: "", name: "(未选择)", files: [] });
-    const filled = !!s.name && s.name !== "(未选择)" && s.name !== "(无文件)";
+    // 「未使用」槽位兜底：强制清空残留 name，避免旧工作流自动填充的模型名被显示/加载
+    if (s.type === "未使用" && s.name !== "(未选择)" && s.name !== "(无文件)") {
+      s.name = "(未选择)";
+      if (w.name) w.name.value = "(未选择)";
+    }
+    const filled = !!s.name && s.name !== "(未选择)" && s.name !== "(无文件)" && s.type !== "未使用";
     // 简洁模式：类型/文件夹控件隐藏（类型自动识别、文件夹用行下按钮），只显示「请加载模型」文件下拉
     setWidgetHidden(w.type, true);
     setWidgetHidden(w.folder, true);

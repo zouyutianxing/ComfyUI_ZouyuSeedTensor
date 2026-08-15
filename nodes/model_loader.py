@@ -238,10 +238,10 @@ class ZouyuModelLoader(io.ComfyNode):
         for i in range(MAX_MODELS):
             t = kwargs.get("model_{}_type".format(i)) or "未使用"
             name = kwargs.get("model_{}_name".format(i)) or ""
-            # 集成模式：只选文件不选类型时自动识别（按"其他"处理）
+            # 类型为「未使用」的空槽位：即使 name 有旧工作流残留值也跳过（不加载）
+            if t == "未使用":
+                continue
             if name and name != "(未选择)":
-                if t == "未使用":
-                    t = "其他"
                 folder = kwargs.get("model_{}_folder".format(i)) or ""
                 slots.append((i, t, folder, name))
 
@@ -253,15 +253,11 @@ class ZouyuModelLoader(io.ComfyNode):
             try:
                 obj, actual_key, note = _load_slot_model(tkey, folder, name)
             except Exception as exc:
-                # 自动恢复：改用该类型默认文件
-                try:
-                    default = _default_file(TYPE_CATEGORY[tkey])
-                    obj, actual_key, note = _load_slot_model(tkey, TYPE_CATEGORY[tkey], default)
-                    notes.append("{}槽位所选文件不可用（{}），已自动改用默认文件 {}".format(
-                        TYPE_LABELS.get(tkey, {}).get("zh", t), str(exc)[:60], default))
-                except Exception as exc2:
-                    raise ValueError("[ZouyuModelLoader] {}槽位没有可用模型文件: {}".format(
-                        TYPE_LABELS.get(tkey, {}).get("zh", t), exc2)) from exc2
+                # 加载失败：跳过该槽位（不中断整个工作流），记录警告。
+                # 避免「不需要的槽位残留值」加载失败导致识别错误并报错。
+                notes.append("{}槽位加载失败（{}），已跳过".format(
+                    TYPE_LABELS.get(tkey, {}).get("zh", t), str(exc)[:80]))
+                continue
             loaded[i] = obj
             actual_keys[i] = actual_key
             if note:
