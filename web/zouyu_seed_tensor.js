@@ -790,8 +790,15 @@ function updateRowButtons(node, overlay, i, rowCY, visible, zh) {
   const st = node.__zouyuSlotState;
   const s = st && st.slots[i];
   const filled = !!(s && s.name && s.name !== "(未选择)" && s.name !== "(无文件)");
+  // 至少选过一个模型后，所有可见下拉都显示按钮（与 applySlotVisibility 一致）
+  let anyFilled = false;
+  for (let j = 0; j < MAX_MODELS; j++) {
+    const sj = st && st.slots[j];
+    if (sj && sj.name && sj.name !== "(未选择)" && sj.name !== "(无文件)") { anyFilled = true; break; }
+  }
+  const showBtn = visible && (filled || anyFilled);
   let bar = overlay.querySelector(`[data-zouyu-btns="${i}"]`);
-  if (!visible || !filled) {
+  if (!showBtn) {
     if (bar) bar.remove();
     return;
   }
@@ -855,14 +862,22 @@ function layoutLoaderOverlay(node) {
   const rowH = measureRowHeight(node);
   for (let i = 0; i < MAX_MODELS; i++) {
     const visible = i < count;
-    // 行锚点：该行名字控件的输入端口点
-    const anchor = findSlotEl(el, `-in-${3 * i + 2}`);
+    // 行锚点：优先用控件行 DOM（type/folder 隐藏后端口索引不可靠），端口点作兜底
     let rowCY = null;
-    if (anchor) {
-      const r = anchor.getBoundingClientRect();
-      rowCY = r.top + r.height / 2 - nodeRect.top;
-    } else if (rowH) {
-      rowCY = (visibleRowIndex(node, i) + 0.5) * rowH;
+    const rows = el.querySelectorAll('[data-testid="node-widget"]');
+    const row = rows[visibleRowIndex(node, i)];
+    if (row) {
+      const rr = row.getBoundingClientRect();
+      rowCY = rr.top + rr.height / 2 - nodeRect.top;
+    }
+    if (rowCY == null) {
+      const anchor = findSlotEl(el, `-in-${3 * i + 2}`);
+      if (anchor) {
+        const r = anchor.getBoundingClientRect();
+        rowCY = r.top + r.height / 2 - nodeRect.top;
+      } else if (rowH) {
+        rowCY = (visibleRowIndex(node, i) + 0.5) * rowH;
+      }
     }
     // 输出端口点：可见槽位平移到该行（与下拉平行、最右）；隐藏槽位隐藏端口
     const outDot = findSlotEl(el, `-out-${i}`);
@@ -1139,8 +1154,8 @@ function layoutLegacyLoader(node) {
       && s.name !== "(未选择)" && s.name !== "(无文件)";
     if (used) {
       const nameW = slotWidgets(node, i).name;
-      const rowY = (nameW && nameW.y != null ? nameW.y : 0) + H / 2;
-      out.pos = [node.size[0] - 8, rowY]; // 端口与下拉平行、位于最右
+      const rowY = slotRowCenterY(nameW, H); // 端口与下拉同一水平线（行中心）
+      out.pos = [node.size[0] - 8, rowY];
       if (!node.__zouyuStatus[`slot${i}`]) node.__zouyuStatus[`slot${i}`] = { color: "#9e9e9e" };
     } else {
       out.pos = [-500, -500]; // 未使用的端口移出画布（不再堆在顶部）
@@ -1154,6 +1169,14 @@ function layoutLegacyLoader(node) {
       if (Math.abs(h - node.size[1]) > 2) node.setSize([node.size[0], h]);
     } catch (e) { /* 忽略 */ }
   }
+}
+
+/** 槽位下拉行的垂直中心（相对节点顶部）：优先用控件实际高度 computedHeight，
+ *  避免 NODE_WIDGET_HEIGHT 与真实行高不一致导致灯/端口偏离下拉中线。 */
+function slotRowCenterY(nameW, H) {
+  if (!nameW) return H / 2;
+  const h = (nameW.computedHeight && nameW.computedHeight > 0) ? nameW.computedHeight : H;
+  return (nameW.y != null ? nameW.y : 0) + h / 2;
 }
 
 /** 画布绘制：行尾 = 三色状态灯 + 状态文字（与下拉同一水平线，位于最右端口旁）。 */
@@ -1171,7 +1194,7 @@ function drawLegacyOverlay(node, ctx) {
     const s = st.slots[i];
     if (!s || !s.name || s.name === "(未选择)" || s.name === "(无文件)") continue;
     const nameW = slotWidgets(node, i).name;
-    const y = (nameW && nameW.y != null ? nameW.y : 0) + H / 2;
+    const y = slotRowCenterY(nameW, H);
     const info = node.__zouyuStatus && node.__zouyuStatus[`slot${i}`];
     const color = (info && info.color) || "#9e9e9e";
     // 三色灯（状态文字与端口之间）：绿=已加载(显存) 蓝=未加载(内存) 红=已卸载(硬盘)
@@ -1244,6 +1267,12 @@ function applySlotVisibility(node) {
   const st = node.__zouyuSlotState;
   if (!st) return;
   const count = visibleSlotCount(st);
+  // 是否已选过至少一个模型：选过之后，所有可见下拉（含新出现的空下拉）都显示下方的文件夹/加载按钮
+  let anyFilled = false;
+  for (let j = 0; j < MAX_MODELS; j++) {
+    const sj = st.slots[j];
+    if (sj && sj.name && sj.name !== "(未选择)" && sj.name !== "(无文件)") { anyFilled = true; break; }
+  }
   for (let i = 0; i < MAX_MODELS; i++) {
     const w = slotWidgets(node, i);
     const visible = i < count;
@@ -1253,11 +1282,12 @@ function applySlotVisibility(node) {
     setWidgetHidden(w.type, true);
     setWidgetHidden(w.folder, true);
     setWidgetHidden(w.name, !visible);
-    // 行下按钮（📁 文件夹 / 加载·卸载）：仅当该槽位已选模型文件时显示（功能七：初始只显示下拉）
+    // 行下按钮（📁 文件夹 / 加载·卸载）：至少选过一个模型后，每个可见下拉都显示
+    const showBtn = visible && (filled || anyFilled);
     const folderBtn = node.widgets?.find((x) => x.__zouyuSlotBtn === `folder_${i}`);
     const actBtn = node.widgets?.find((x) => x.__zouyuSlotBtn === `action_${i}`);
-    if (folderBtn) setWidgetHidden(folderBtn, !(visible && filled));
-    if (actBtn) setWidgetHidden(actBtn, !(visible && filled));
+    if (folderBtn) setWidgetHidden(folderBtn, !showBtn);
+    if (actBtn) setWidgetHidden(actBtn, !showBtn);
     if (w.type && w.type.value !== s.type) w.type.value = s.type;
     if (w.folder && w.folder.value !== s.folder) w.folder.value = s.folder;
     if (w.name && w.name.value !== s.name) w.name.value = s.name;
@@ -1520,9 +1550,8 @@ function setupModelLoaderNode(node) {
 
   // 挂接回调（包装原有回调，保证值仍然流向后端）
   const configDirty = () => {
-    // 配置变化 → 推送给后端供开关下拉识别，并刷新图中所有开关
-    pushLoaderConfig(node);
-    refreshAllSwitchCombos();
+    // 配置变化 → 先推送给后端（register_config 完成后），再刷新图中所有开关的下拉（避免竞态）
+    Promise.resolve(pushLoaderConfig(node)).then(() => refreshAllSwitchCombos());
   };
   for (let i = 0; i < MAX_MODELS; i++) {
     const w = slotWidgets(node, i);
@@ -1685,7 +1714,7 @@ function applySwitchSubtitle(node) {
   app.graph?.setDirtyCanvas(true, true);
 }
 
-/** 开关模型下拉：从 /status 拉取已配置模型（只显示 slot 槽位）。 */
+/** 开关模型下拉：从 /status 拉取已配置模型（只显示 slot 槽位，选项 = 加载器中已选择的模型文件）。 */
 async function refreshSwitchModelCombo(node) {
   if (!node) return;
   const w = node.widgets?.find((x) => x.name === "model");
@@ -1694,10 +1723,10 @@ async function refreshSwitchModelCombo(node) {
     const r = await fetch("/zouyu_model_loader/status");
     if (!r.ok) return;
     const payload = await r.json();
-    const zh = node.__zouyuLang !== "English";
+    // 只列出加载器中已配置/已选模型的槽位；显示名 = 模型文件名（与加载器下拉一致）
     const items = (payload.models || [])
       .filter((m) => String(m.kind || "").startsWith("slot"))
-      .map((m) => ({ value: m.kind, label: (zh ? m.label_zh : m.label_en) + " · " + m.name }));
+      .map((m) => ({ value: m.kind, label: m.name || m.kind }));
     w.options = w.options || {};
     const values = ["(未选择)", ...items.map((i) => i.value)];
     if (!w.options.values || w.options.values.join("|") !== values.join("|")) {
