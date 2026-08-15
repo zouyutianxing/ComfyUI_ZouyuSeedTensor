@@ -685,7 +685,7 @@ function visibleRowIndex(node, i) {
   return idx;
 }
 
-/** 行尾叠加：状态灯 + 类型标签(集成模式) + 📁(常规模式)。 */
+/** 行尾叠加：状态文字 + 三色灯 + 类型标签(集成模式)。 */
 function updateRowTail(node, overlay, i, rowCY, visible, used, compact, zh) {
   let tail = overlay.querySelector(`[data-zouyu-tail="${i}"]`);
   if (!visible || !used) {
@@ -712,13 +712,6 @@ function updateRowTail(node, overlay, i, rowCY, visible, used, compact, zh) {
       ? (zh ? "自动" : "Auto")
       : (zh ? s.type : (TYPE_PORT_NAMES_EN[TYPE_KEYS[s.type]] || s.type));
     tail.appendChild(tag);
-  } else {
-    const btn = document.createElement("button");
-    btn.className = "zouyu-rt-folder";
-    btn.textContent = "📁";
-    btn.title = zh ? "选择模型文件夹" : "Choose model folder";
-    btn.addEventListener("click", (e) => { e.stopPropagation(); pickSlotFolder(node, i); });
-    tail.appendChild(btn);
   }
   const light = document.createElement("span");
   light.className = "zouyu-rt-light";
@@ -731,7 +724,7 @@ function updateRowTail(node, overlay, i, rowCY, visible, used, compact, zh) {
   if (node.__zouyuStatus) node.__zouyuStatus[`slot${i}`] = { el: light, textEl, tag, dotOnly: true };
 }
 
-/** 布局一次：端口点平移到下拉行 + 行尾灯/标签/📁 定位（节点 DOM 内，自动跟随节点）。 */
+/** 布局一次：端口点平移到下拉行 + 行尾灯/文字/标签 定位（节点 DOM 内，自动跟随节点）。 */
 function layoutLoaderOverlay(node) {
   const el = nodeEl(node);
   const st = node.__zouyuSlotState;
@@ -1060,7 +1053,7 @@ function layoutLegacyLoader(node) {
   }
 }
 
-/** 画布绘制：每行端口左侧画三色灯 + 占用状态文字；常规模式画 📁，集成模式画类型标签。 */
+/** 画布绘制：行尾 = 状态文字 + 三色灯 + 端口；行首 = 📁（常规模式）；集成模式再加类型标签。 */
 function drawLegacyOverlay(node, ctx) {
   const st = node.__zouyuSlotState;
   if (!st || !ctx) return;
@@ -1079,7 +1072,7 @@ function drawLegacyOverlay(node, ctx) {
     const y = (nameW && nameW.y != null ? nameW.y : 0) + H / 2;
     const info = node.__zouyuStatus && node.__zouyuStatus[`slot${i}`];
     const color = (info && info.color) || "#9e9e9e";
-    // 三色灯（下拉与端口之间）
+    // 三色灯（状态文字与端口之间）
     ctx.beginPath();
     ctx.arc(W - 24, y, 6, 0, Math.PI * 2);
     ctx.fillStyle = color;
@@ -1092,19 +1085,20 @@ function drawLegacyOverlay(node, ctx) {
     ctx.fillStyle = "#c8c8c8";
     ctx.textAlign = "right";
     const stateText2 = zh ? (info && info.zh) || "未知" : (info && info.en) || "Unknown";
-    ctx.fillText(stateText2, W - 37, y);
+    ctx.fillText(stateText2, W - 40, y);
     if (compact) {
       // 集成模式：类型标签显示在端口旁
       const tkey = TYPE_KEYS[s.type];
       const label = zh ? s.type : (TYPE_PORT_NAMES_EN[tkey] || s.type);
       ctx.font = "10px sans-serif";
       ctx.fillStyle = "#c9a05f";
-      ctx.fillText(label, W - 92, y);
+      ctx.fillText(label, W - 100, y);
     } else {
-      // 📁 选择文件夹按钮
+      // 行首 📁 文件夹选择（常规模式；不占用行尾空间）
       ctx.font = "12px sans-serif";
       ctx.fillStyle = "#d8d8d8";
-      ctx.fillText("📁", W - 55, y);
+      ctx.textAlign = "left";
+      ctx.fillText("\u{1F4C1}", 8, y);
     }
     ctx.textAlign = "left";
   }
@@ -1124,7 +1118,7 @@ function legacyMouseDown(node, pos) {
     if (!s || s.type === "未使用") continue;
     const nameW = slotWidgets(node, i).name;
     const y = (nameW && nameW.y != null ? nameW.y : 0) + H / 2;
-    if (pos[0] >= W - 72 && pos[0] <= W - 48 && pos[1] >= y - 9 && pos[1] <= y + 9) {
+    if (pos[0] <= 28 && pos[0] >= 0 && pos[1] >= y - 9 && pos[1] <= y + 9) {
       pickSlotFolder(node, i);
       return true;
     }
@@ -1307,6 +1301,11 @@ function setupModelLoaderNode(node) {
   startStatusPolling();
 
   // 挂接回调（包装原有回调，保证值仍然流向后端）
+  const configDirty = () => {
+    // 配置变化 → 推送给后端供开关下拉识别，并刷新图中所有开关
+    pushLoaderConfig(node);
+    refreshAllSwitchCombos();
+  };
   for (let i = 0; i < MAX_MODELS; i++) {
     const w = slotWidgets(node, i);
     if (!w.type) continue;
@@ -1323,6 +1322,7 @@ function setupModelLoaderNode(node) {
         refreshSlotFileOptions(node, i);
       }
       applySlotVisibility(node);
+      configDirty();
     };
     if (w.name) {
       const origNameCb = w.name.callback;
@@ -1330,6 +1330,7 @@ function setupModelLoaderNode(node) {
         if (origNameCb) origNameCb.call(w.name, v);
         s.name = v;
         applySlotVisibility(node);
+        configDirty();
       };
     }
     if (w.folder) {
@@ -1338,6 +1339,7 @@ function setupModelLoaderNode(node) {
         if (origFolderCb) origFolderCb.call(w.folder, v);
         s.folder = v;
         refreshSlotFileOptions(node, i);
+        configDirty();
       };
     }
   }
@@ -1383,6 +1385,8 @@ function setupModelLoaderNode(node) {
       syncStateFromWidgets(node);
       applySlotVisibility(node);
       applyLoaderLabels(node);
+      pushLoaderConfig(node);
+      refreshAllSwitchCombos();
     } catch (e) { /* ignore */ }
     const r = origCfg ? origCfg.apply(this, args) : undefined;
     return r;
@@ -1407,11 +1411,21 @@ function setupModelLoaderNode(node) {
       syncStateFromWidgets(node);
       applySlotVisibility(node);
       applyLoaderLabels(node);
+      pushLoaderConfig(node);
+      refreshAllSwitchCombos();
     } catch (e) { /* ignore */ }
   }, 150);
   setTimeout(() => {
-    try { syncStateFromWidgets(node); applySlotVisibility(node); } catch (e) { /* ignore */ }
+    try {
+      syncStateFromWidgets(node);
+      applySlotVisibility(node);
+      pushLoaderConfig(node);
+      refreshAllSwitchCombos();
+    } catch (e) { /* ignore */ }
   }, 600);
+  // 初始推送一次（界面新建节点即让开关下拉可见）
+  pushLoaderConfig(node);
+  refreshAllSwitchCombos();
 }
 
 
@@ -1484,6 +1498,27 @@ function refreshAllSwitchCombos() {
   const nodes = app.graph?._nodes || [];
   for (const n of nodes) {
     if ((n.comfyClass || n.type) === "ZouyuModelSwitch") refreshSwitchModelCombo(n);
+  }
+}
+
+/** 把加载器当前配置推送后端：开关下拉无需运行加载器即可识别（槽位配置即推即见）。 */
+async function pushLoaderConfig(node) {
+  const st = node && node.__zouyuSlotState;
+  if (!st) return;
+  const slots = [];
+  for (let i = 0; i < MAX_MODELS; i++) {
+    const s = st.slots[i];
+    if (!s || s.type === "未使用" || !s.name || s.name === "(未选择)" || s.name === "(无文件)") continue;
+    slots.push({ slot: i, tkey: TYPE_KEYS[s.type] || "other", folder: s.folder || "", name: s.name });
+  }
+  try {
+    await fetch("/zouyu_model_loader/register_config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slots }),
+    });
+  } catch (e) {
+    /* 服务端未就绪时忽略 */
   }
 }
 

@@ -25,9 +25,10 @@ _REGISTRY = {
     "switch": False,      # 节点1 的低显存开关（True=极低显存，彻底卸载；False=交给官方管理）
     "switch_ts": 0.0,
     "loader_ts": 0.0,     # 节点1 最近一次执行时间
-    "models": {},         # kind -> {kind, name, obj, patcher, state, ts}  （节点1 的四个模型）
-    "watched": {},        # id(patcher) -> {kind, patcher, ts}             （节点2 观测到的任意模型）
-    "signals": [],        # (kind, state, ts) 闲置信号（节点2 → 节点1）
+    "models": {},         # kind -> {kind, name, obj, patcher, state, ts}  （加载器执行后登记）
+    "configured": {},     # kind -> {kind, tkey, folder, name}               （前端推送的配置，未运行即可用）
+    "watched": {},        # id(patcher) -> {kind, patcher, ts}             （观测到的任意模型）
+    "signals": [],        # (kind, state, ts) 闲置信号
     "events": [],         # 日志环形缓冲
 }
 
@@ -285,10 +286,37 @@ def evaluate_idle(kind, patcher, zh, has_trigger=False):
 SWITCH_SLOT_COUNT = 8
 
 
-def configured_model_kinds():
-    """已登记（配置好）的模型槽位 kind 列表（供开关下拉显示）。"""
+def register_config(slots):
+    """前端推送的加载器槽位配置（模型加载器在界面上配置后即可被开关识别，无需先运行）。
+
+    slots: [{slot: int, tkey: str, folder: str, name: str}, ...]（空槽位传空 name 即清除）
+    """
     with _LOCK:
-        kinds = [k for k in _REGISTRY["models"] if k.startswith("slot")]
+        for s in slots or []:
+            try:
+                idx = int(s.get("slot", -1))
+            except Exception:
+                continue
+            if not (0 <= idx < SWITCH_SLOT_COUNT):
+                continue
+            kind = "slot{}".format(idx)
+            name = str(s.get("name") or "").strip()
+            if not name or name in ("(未选择)", "(无文件)"):
+                _REGISTRY["configured"].pop(kind, None)
+                continue
+            _REGISTRY["configured"][kind] = {
+                "kind": kind,
+                "tkey": str(s.get("tkey") or "other"),
+                "folder": str(s.get("folder") or ""),
+                "name": name,
+            }
+
+
+def configured_model_kinds():
+    """已登记/已配置的模型槽位 kind 列表（供开关下拉显示）。"""
+    with _LOCK:
+        kinds = set(k for k in _REGISTRY["models"] if k.startswith("slot"))
+        kinds |= set(k for k in _REGISTRY["configured"] if k.startswith("slot"))
     return sorted(kinds, key=lambda k: (len(k), k))
 
 
@@ -298,12 +326,17 @@ def configured_model_options():
     return ["(未选择)"] + ["slot{}".format(i) for i in range(SWITCH_SLOT_COUNT)]
 
 
-def _slot_label(kind, zh):
-    with _LOCK:
-        e = _REGISTRY["models"].get(kind)
-    if e is None:
-        return kind
-    mtype = e.get("model_type", "")
+def _slot_label(kind, zh, e=None, cfg=None):
+    mtype = ""
+    if e is not None:
+        mtype = e.get("model_type", "")
+    elif cfg is not None:
+        mtype = cfg.get("tkey", "")
+    if not mtype and kind.startswith("slot"):
+        with _LOCK:
+            e2 = _REGISTRY["models"].get(kind)
+            c2 = _REGISTRY["configured"].get(kind)
+        mtype = (e2 or c2 or {}).get("model_type") or (c2 or {}).get("tkey") or ""
     if kind.startswith("slot") and mtype in SLOT_TYPE_LABELS:
         t = SLOT_TYPE_LABELS[mtype]
         return (t["zh"] if zh else t["en"]) + kind[len("slot"):]
@@ -311,17 +344,44 @@ def _slot_label(kind, zh):
 
 
 def load_or_unload_model(kind, do_load, zh):
-    """模型加载开关：信号经过时按开关执行 加载/彻底卸载，返回说明文字。"""
+    """模型加载开关：按 加载/彻底卸载 执行，返回说明文字。
+
+    优先操作已登记（执行过加载器）的模型对象；只有配置未运行时：
+    - 加载 → 直接从配置的文件加载并登记；
+    - 卸载 → 提示尚未加载。
+    """
     with _LOCK:
         e = _REGISTRY["models"].get(kind)
-    if e is None:
-        return ("未找到模型 {}（请先运行一次模型加载器）".format(kind)
-                if zh else "model {} not found (run the loader first)".format(kind))
-    name = e.get("name", "") or kind
-    label = _slot_label(kind, zh)
+        cfg = _REGISTRY["configured"].get(kind)
+    if e is None and cfg is None:
+        return ("未找到模型 {}（请先在模型加载器中配置该槽位）".format(kind)
+                if zh else "model {} not found (configure it in the loader first)".format(kind))
+    name = (e or cfg).get("name", "") or kind
+    label = _slot_label(kind, zh, e=e, cfg=cfg)
     if do_load:
-        return _do_load_model(e, name, label, zh)
-    return _do_unload_model(e, name, label, zh)
+        if e is not None:
+            return _do_load_model(e, name, label, zh)
+        return _do_load_config(kind, cfg, name, label, zh)
+    # 卸载
+    if e is not None:
+        return _do_unload_model(e, name, label, zh)
+    return ("{} 尚未加载（未运行加载器），无需卸载".format(label)
+            if zh else "{} not loaded yet (loader not run), nothing to unload".format(label))
+
+
+def _do_load_config(kind, cfg, name, label, zh):
+    """仅有配置未运行：直接从配置的文件加载并登记到注册表。"""
+    try:
+        from .model_loader import _load_slot_model
+        tkey = cfg.get("tkey") or "other"
+        folder = cfg.get("folder", "")
+        obj, actual, note = _load_slot_model(tkey, folder, cfg.get("name", ""))
+        register(kind, cfg.get("name", ""), obj, model_type=actual, folder=folder, tkey=tkey)
+        return ("已加载 {} {}（{}）".format(label, name, note or "显存")
+                if zh else "loaded {} {} ({})".format(label, name, note or "VRAM"))
+    except Exception as exc:
+        return ("加载 {} 失败：{}".format(name, str(exc)[:80])
+                if zh else "load {} failed: {}".format(name, str(exc)[:80]))
 
 
 def _do_load_model(e, name, label, zh):
@@ -401,6 +461,36 @@ def status_payload():
                 "type_zh": tinfo["zh"] if tinfo else "",
                 "type_en": tinfo["en"] if tinfo else "",
                 "ts": e.get("ts", 0.0),
+            })
+        # 合并"仅配置未运行"的模型（加载器界面上配置后即可被开关下拉识别）
+        seen = {m["kind"] for m in models}
+        unknown = STATE_INFO["unknown"]
+        for kind, c in _REGISTRY["configured"].items():
+            if kind in seen:
+                continue
+            mtype = c.get("tkey", "")
+            tinfo = MODEL_TYPE_INFO.get(mtype, MODEL_TYPE_INFO["unknown"]) if mtype else None
+            if kind.startswith("slot") and mtype in SLOT_TYPE_LABELS:
+                label_zh = SLOT_TYPE_LABELS[mtype]["zh"] + kind[len("slot"):]
+                label_en = SLOT_TYPE_LABELS[mtype]["en"] + kind[len("slot"):]
+            else:
+                label_zh = kind
+                label_en = kind
+            models.append({
+                "kind": kind,
+                "label": label_zh,
+                "label_zh": label_zh,
+                "label_en": label_en,
+                "name": c.get("name", ""),
+                "state": "unknown",
+                "color": unknown["color"],
+                "zh": unknown["zh"],
+                "en": unknown["en"],
+                "type": mtype,
+                "type_zh": tinfo["zh"] if tinfo else "",
+                "type_en": tinfo["en"] if tinfo else "",
+                "ts": 0.0,
+                "configured_only": True,
             })
         return {
             "switch": _REGISTRY["switch"],
@@ -746,6 +836,16 @@ def register_routes():
     async def _status(request):
         return web.json_response(status_payload())
 
+    @routes.post("/zouyu_model_loader/register_config")
+    async def _register_config(request):
+        """前端推送加载器槽位配置：加载器在界面上配置后，开关下拉即可识别（无需先运行）。"""
+        try:
+            data = await request.json()
+            register_config(data.get("slots") or [])
+            return web.json_response({"ok": True, "count": len(_REGISTRY["configured"])})
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)[:200]}, status=400)
+
 
 # ---------------------------------------------------------------------------
 # 节点2：模型加载开关（导线式信号检测 → 加载/卸载任务）
@@ -762,16 +862,16 @@ class ZouyuModelSwitch(io.ComfyNode):
             display_name="模型加载开关 (Model Load Switch)",
             category="ZouyuAI/SeedTensor",
             description=(
-                "导线式信号检测：左右各一个端口，信号直接透传，不做任何处理。"
-                "当有数据经过本节点时，按『动作』开关执行任务——打开（加载）：把下拉所选模型"
-                "加载进显存/CPU内存；关闭（卸载）：把该模型从显存与CPU内存彻底卸载。"
-                "下拉菜单只显示模型加载器中已配置好的模型（需先运行一次模型加载器登记配置）。"
-                "副标题实时显示当前动作（加载/卸载）。"
+                "导线式信号检测：左右各一个端口（* 任意类型），可插入任何插件之间的连线，"
+                "信号直接透传。当检测到信号（数据）经过本节点时，按『动作』开关执行任务——"
+                "打开（加载）：把下拉所选模型加载进显存/CPU内存；关闭（卸载）：把该模型从"
+                "显存与CPU内存彻底卸载。模型下拉自动识别模型加载器在界面上已配置的模型"
+                "（无需先运行加载器）。副标题实时显示当前动作（加载/卸载）。"
             ),
             inputs=[
-                io.AnyType.Input("signal", optional=True, tooltip="信号输入（任意类型，直接透传）"),
+                io.AnyType.Input("signal", optional=True, tooltip="信号输入（任意类型，直接透传；有数据经过时触发任务）"),
                 io.Combo.Input("model", options=configured_model_options(), default="(未选择)",
-                               tooltip="选择要控制的模型（模型加载器中已配置的槽位）"),
+                               tooltip="选择要控制的模型（自动列出模型加载器已配置的槽位）"),
                 io.Boolean.Input("action", default=True, label_on="加载", label_off="卸载",
                                  tooltip="加载=信号经过时把模型加载进显存；卸载=信号经过时从显存+CPU内存彻底卸载"),
                 io.Combo.Input("language", options=["中文", "English"], default="中文"),
@@ -784,6 +884,10 @@ class ZouyuModelSwitch(io.ComfyNode):
     @classmethod
     def execute(cls, signal=None, model="(未选择)", action=True, language="中文") -> io.NodeOutput:
         zh = (language != "English")
+        # 信号检测：只有真正有数据经过（signal 非空）才触发加载/卸载任务
+        if signal is None:
+            text = ("无信号经过：仅透传" if zh else "no signal: pass-through only")
+            return io.NodeOutput(signal, ui={"text": [text]})
         if model and model != "(未选择)":
             msg = load_or_unload_model(model, bool(action), zh)
             log_event(msg)
