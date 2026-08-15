@@ -110,6 +110,7 @@ const BOOL_LABELS = {
   rebuild: { zh: ["重建目录", "读取目录"], en: ["Rebuild", "Read"] },
   low_vram_mode: { zh: ["彻底卸载", "CPU缓存"], en: ["Full unload", "CPU cache"] },
   action: { zh: ["加载", "卸载"], en: ["Load", "Unload"] },
+  compact_view: { zh: ["完整", "简洁"], en: ["Full", "Compact"] },
 };
 
 const TITLES = {
@@ -710,7 +711,11 @@ async function refreshSlotFileOptions(node, i) {
     s.files = (d.files || []).length ? d.files : [];
     w.options = w.options || {};
     w.options.values = s.files.length ? s.files : ["(未选择)"];
-    if (!s.files.includes(w.value)) w.value = s.files[0] || "(未选择)";
+    // 未选择（占位符）保持不动，避免把下拉自动填成第一个文件；
+    // 只有当前值已失效时才回退到第一个可用文件
+    if (w.value !== "(未选择)" && w.value !== "(无文件)" && !s.files.includes(w.value)) {
+      w.value = s.files[0] || "(未选择)";
+    }
   } catch (e) {
     w.options.values = ["(未选择)"];
   }
@@ -757,7 +762,8 @@ function visibleRowIndex(node, i) {
   return idx;
 }
 
-/** 行尾叠加：三色状态灯 + 状态文字（与下拉同一水平线，位于最右端口旁）。 */
+/** 行尾叠加：三色状态灯 + 状态文字（与下拉同一水平线，位于最右端口旁）。
+ *  未选模型=灰色「未选择」；已选模型=按状态三色。 */
 function updateRowTail(node, overlay, i, rowCY, visible, zh) {
   let tail = overlay.querySelector(`[data-zouyu-tail="${i}"]`);
   if (!visible) {
@@ -774,13 +780,21 @@ function updateRowTail(node, overlay, i, rowCY, visible, zh) {
   }
   tail.style.top = (rowCY != null ? rowCY : 12) + "px";
   tail.innerHTML = "";
+  const st2 = node.__zouyuSlotState;
+  const s = st2 && st2.slots[i];
+  const filled = !!(s && s.name && s.name !== "(未选择)" && s.name !== "(无文件)");
+  const info = node.__zouyuStatus && node.__zouyuStatus[`slot${i}`];
+  const stInfo = filled ? (STATE_INFO[(info && info.state) || "unknown"] || STATE_INFO.unknown) : null;
   const light = document.createElement("span");
   light.className = "zouyu-rt-light";
   light.title = zh ? "绿=已加载(显存) 蓝=未加载(内存) 红=已卸载(硬盘)" : "Green=VRAM Blue=RAM Red=Disk";
+  light.style.background = stInfo ? stInfo.color : "#9e9e9e";
   tail.appendChild(light);
   const textEl = document.createElement("span");
   textEl.className = "zouyu-rt-text";
-  textEl.textContent = zh ? "未加载" : "Not loaded";
+  textEl.textContent = filled
+    ? (zh ? (info && info.zh) || "未知" : (info && info.en) || "Unknown")
+    : (zh ? "未选择" : "Not chosen");
   tail.appendChild(textEl);
   if (node.__zouyuStatus) node.__zouyuStatus[`slot${i}`] = { el: light, textEl, tag: null, dotOnly: true };
 }
@@ -790,13 +804,13 @@ function updateRowButtons(node, overlay, i, rowCY, visible, zh) {
   const st = node.__zouyuSlotState;
   const s = st && st.slots[i];
   const filled = !!(s && s.name && s.name !== "(未选择)" && s.name !== "(无文件)");
-  // 至少选过一个模型后，所有可见下拉都显示按钮（与 applySlotVisibility 一致）
+  // 至少选过一个模型、且精简显示开关打开时，所有可见下拉都显示按钮（与 applySlotVisibility 一致）
   let anyFilled = false;
   for (let j = 0; j < MAX_MODELS; j++) {
     const sj = st && st.slots[j];
     if (sj && sj.name && sj.name !== "(未选择)" && sj.name !== "(无文件)") { anyFilled = true; break; }
   }
-  const showBtn = visible && (filled || anyFilled);
+  const showBtn = visible && (filled || anyFilled) && !!st.compactView;
   let bar = overlay.querySelector(`[data-zouyu-btns="${i}"]`);
   if (!showBtn) {
     if (bar) bar.remove();
@@ -899,6 +913,9 @@ function layoutLoaderOverlay(node) {
     updateRowTail(node, overlay, i, rowCY, visible, zh);
     updateRowButtons(node, overlay, i, rowCY, visible, zh);
   }
+  // 精简显示开关：关闭（简洁）时隐藏底部导入条
+  const ib = overlay.querySelector(".zouyu-import-bar");
+  if (ib) ib.style.display = st.compactView ? "" : "none";
   if (node.__zouyuLang !== st.lang) {
     const bar = overlay.querySelector(".zouyu-import-bar");
     if (bar) {
@@ -1111,6 +1128,7 @@ function syncStateFromWidgets(node) {
     st.slots[i].name = w.name?.value || "(未选择)";
   }
   st.lowVram = !!node.widgets?.find((w) => w.name === "low_vram_mode")?.value;
+  st.compactView = !!node.widgets?.find((w) => w.name === "compact_view")?.value;
   st.lang = node.widgets?.find((w) => w.name === "language")?.value || getLang();
 }
 
@@ -1179,7 +1197,8 @@ function slotRowCenterY(nameW, H) {
   return (nameW.y != null ? nameW.y : 0) + h / 2;
 }
 
-/** 画布绘制：行尾 = 三色状态灯 + 状态文字（与下拉同一水平线，位于最右端口旁）。 */
+/** 画布绘制：行尾 = 三色状态灯 + 状态文字（与下拉同一水平线，位于最右端口旁）。
+ *  每个可见下拉行都绘制灯：未选模型=灰色「未选择」，已选模型=按状态三色（绿=已加载/显存、蓝=未加载/内存、红=已卸载/硬盘）。 */
 function drawLegacyOverlay(node, ctx) {
   const st = node.__zouyuSlotState;
   if (!st || !ctx) return;
@@ -1192,12 +1211,20 @@ function drawLegacyOverlay(node, ctx) {
   for (let i = 0; i < MAX_MODELS; i++) {
     if (i >= count) break;
     const s = st.slots[i];
-    if (!s || !s.name || s.name === "(未选择)" || s.name === "(无文件)") continue;
+    if (!s) continue;
     const nameW = slotWidgets(node, i).name;
     const y = slotRowCenterY(nameW, H);
+    const filled = !!s.name && s.name !== "(未选择)" && s.name !== "(无文件)";
     const info = node.__zouyuStatus && node.__zouyuStatus[`slot${i}`];
-    const color = (info && info.color) || "#9e9e9e";
-    // 三色灯（状态文字与端口之间）：绿=已加载(显存) 蓝=未加载(内存) 红=已卸载(硬盘)
+    let color, text;
+    if (!filled) {
+      color = "#9e9e9e";
+      text = zh ? "未选择" : "Not chosen";
+    } else {
+      color = (info && info.color) || "#9e9e9e";
+      text = zh ? (info && info.zh) || "未知" : (info && info.en) || "Unknown";
+    }
+    // 三色灯
     ctx.beginPath();
     ctx.arc(W - 24, y, 6, 0, Math.PI * 2);
     ctx.fillStyle = color;
@@ -1209,8 +1236,7 @@ function drawLegacyOverlay(node, ctx) {
     ctx.font = "10px sans-serif";
     ctx.fillStyle = "#c8c8c8";
     ctx.textAlign = "right";
-    const stateText2 = zh ? (info && info.zh) || "未知" : (info && info.en) || "Unknown";
-    ctx.fillText(stateText2, W - 40, y);
+    ctx.fillText(text, W - 40, y);
     ctx.textAlign = "left";
   }
   ctx.restore();
@@ -1249,7 +1275,17 @@ function setupLegacyLoaderLayout(node) {
   }
   node.onDrawForeground = (ctx) => {
     layoutLegacyLoader(node); // 每帧刷新端口 X（跟随节点宽度变化）
-    drawLegacyOverlay(node, ctx);
+  };
+  // ComfyUI 绘制顺序：onDrawForeground → drawSlots → drawWidgets（控件）。
+  // 控件（combo 全宽背景）会盖住 onDrawForeground 里画的内容，
+  // 因此把三色灯/状态文字移到 drawWidgets 之后绘制，保证灯可见于控件之上。
+  const origDrawWidgets = node.drawWidgets ? node.drawWidgets.bind(node) : null;
+  node.drawWidgets = function (ctx, opts) {
+    const r = origDrawWidgets ? origDrawWidgets(ctx, opts) : undefined;
+    try {
+      drawLegacyOverlay(node, ctx);
+    } catch (e) { /* 绘制异常不影响控件 */ }
+    return r;
   };
   node.onMouseDown = (e, pos) => legacyMouseDown(node, pos);
   // 底部"拖入文件夹导入"按钮（画布原生可点击，占用一行）
@@ -1273,6 +1309,8 @@ function applySlotVisibility(node) {
     const sj = st.slots[j];
     if (sj && sj.name && sj.name !== "(未选择)" && sj.name !== "(无文件)") { anyFilled = true; break; }
   }
+  // 精简显示开关：关闭（简洁）= 隐藏文件夹/加载按钮与导入条，只保留下拉/灯/提示/端口/低显存/语言/本开关
+  const showActions = !!st.compactView;
   for (let i = 0; i < MAX_MODELS; i++) {
     const w = slotWidgets(node, i);
     const visible = i < count;
@@ -1282,8 +1320,8 @@ function applySlotVisibility(node) {
     setWidgetHidden(w.type, true);
     setWidgetHidden(w.folder, true);
     setWidgetHidden(w.name, !visible);
-    // 行下按钮（📁 文件夹 / 加载·卸载）：至少选过一个模型后，每个可见下拉都显示
-    const showBtn = visible && (filled || anyFilled);
+    // 行下按钮（📁 文件夹 / 加载·卸载）：至少选过一个模型、且精简显示开关打开时显示
+    const showBtn = visible && (filled || anyFilled) && showActions;
     const folderBtn = node.widgets?.find((x) => x.__zouyuSlotBtn === `folder_${i}`);
     const actBtn = node.widgets?.find((x) => x.__zouyuSlotBtn === `action_${i}`);
     if (folderBtn) setWidgetHidden(folderBtn, !showBtn);
@@ -1295,6 +1333,9 @@ function applySlotVisibility(node) {
   // 集成模式开关不再需要（简洁模式为默认且唯一），隐藏
   const compactW = node.widgets?.find((w) => w.name === "compact_mode");
   if (compactW) setWidgetHidden(compactW, true);
+  // 底部拖入导入条：精简模式下隐藏
+  const importBar = node.widgets?.find((w) => w.__zouyuImportBar);
+  if (importBar) setWidgetHidden(importBar, !showActions);
   syncLoaderOutputs(node);
   applyLoaderLayout(node);
   app.graph?.setDirtyCanvas(true, true);
@@ -1540,6 +1581,7 @@ function setupModelLoaderNode(node) {
     };
   }
   st.lowVram = !!node.widgets?.find((w) => w.name === "low_vram_mode")?.value;
+  st.compactView = !!node.widgets?.find((w) => w.name === "compact_view")?.value;
   st.lang = node.widgets?.find((w) => w.name === "language")?.value || getLang();
   node.__zouyuSlotState = st;
   node.__zouyuLang = st.lang;
@@ -1599,6 +1641,16 @@ function setupModelLoaderNode(node) {
   if (lowW) {
     const orig = lowW.callback;
     lowW.callback = (v) => { if (orig) orig.call(lowW, v); st.lowVram = !!v; };
+  }
+  // 精简显示开关：关闭（简洁）= 只保留下拉/灯/提示/端口/低显存/语言/本开关；打开（完整）= 显示文件夹/加载按钮与导入条
+  const cvW = node.widgets.find((w) => w.name === "compact_view");
+  if (cvW) {
+    const orig = cvW.callback;
+    cvW.callback = (v) => {
+      if (orig) orig.call(cvW, v);
+      st.compactView = !!v;
+      applySlotVisibility(node);
+    };
   }
   const langW = node.widgets.find((w) => w.name === "language");
   if (langW) {

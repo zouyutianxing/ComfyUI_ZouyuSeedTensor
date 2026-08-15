@@ -192,7 +192,12 @@ class ZouyuModelLoader(io.ComfyNode):
             ])
         inputs.extend([
             io.Boolean.Input("compact_mode", default=False, label_on="集成", label_off="展开",
-                             optional=True, tooltip="集成模式：不显示模型类型/文件夹，只显示模型文件列（含三色状态灯与对应输出端口，类型显示在端口旁）"),
+                             optional=True, tooltip="（已由『精简显示』开关取代，保留以兼容旧工作流）"),
+            io.Boolean.Input("compact_view", default=False, label_on="完整", label_off="简洁",
+                             optional=True,
+                             tooltip="关闭（简洁，默认）：只显示模型下拉/三色灯/加载提示/端口/低显存/语言/本开关，"
+                                     "其余全部隐藏，界面自动收缩；打开（完整）：额外显示每个下拉下方的模型文件夹选择、"
+                                     "手动加载/卸载按钮与底部拖入导入条"),
             io.Boolean.Input("low_vram_mode", default=False, label_on="彻底卸载", label_off="CPU缓存",
                              optional=True, tooltip="开启=极低显存：模型空闲时从显存+CPU内存彻底卸载；关闭=官方管理卸载到CPU内存"),
             io.Combo.Input("language", options=["中文", "English"], default="中文", optional=True),
@@ -217,13 +222,13 @@ class ZouyuModelLoader(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, compact_mode=False, low_vram_mode=False, language="中文",
+    def execute(cls, compact_mode=False, compact_view=False, low_vram_mode=False, language="中文",
                 **kwargs) -> io.NodeOutput:
         zh = (language or "中文") != "English"
         switch = bool(low_vram_mode)
         set_switch(switch)
-        log_event("模型加载器执行（低显存模式={}，集成模式={}）"
-                  .format("开启" if switch else "关闭", "开启" if compact_mode else "关闭"))
+        log_event("模型加载器执行（低显存模式={}，精简显示={}）"
+                  .format("开启" if switch else "关闭", "关闭(简洁)" if not compact_view else "打开(完整)"))
 
         # 收集已使用的槽位
         slots = []

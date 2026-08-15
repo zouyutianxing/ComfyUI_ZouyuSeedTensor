@@ -471,8 +471,9 @@ def status_payload():
                 "ts": e.get("ts", 0.0),
             })
         # 合并"仅配置未运行"的模型（加载器界面上配置后即可被开关下拉识别）
+        # 状态按"free"（红色=模型位于硬盘，未加载）显示，与用户三色语义一致
         seen = {m["kind"] for m in models}
-        unknown = STATE_INFO["unknown"]
+        free = STATE_INFO["free"]
         for kind, c in _REGISTRY["configured"].items():
             if kind in seen:
                 continue
@@ -490,10 +491,10 @@ def status_payload():
                 "label_zh": label_zh,
                 "label_en": label_en,
                 "name": c.get("name", ""),
-                "state": "unknown",
-                "color": unknown["color"],
-                "zh": unknown["zh"],
-                "en": unknown["en"],
+                "state": "free",
+                "color": free["color"],
+                "zh": free["zh"],
+                "en": free["en"],
                 "type": mtype,
                 "type_zh": tinfo["zh"] if tinfo else "",
                 "type_en": tinfo["en"] if tinfo else "",
