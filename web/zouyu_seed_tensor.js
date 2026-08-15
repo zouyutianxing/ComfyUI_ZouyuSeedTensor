@@ -1572,13 +1572,14 @@ function removeSlot(node, i) {
 function setupModelLoaderNode(node) {
   ensureLoaderOverlayStyle();
 
-  // 从 schema 原生控件读取状态（类型默认「其他」= 自动识别）
+  // 从 schema 原生控件读取状态（新节点所有槽位默认「其他」= 自动识别，保证下拉有模型选项）
   const st = { lowVram: false, lang: getLang(), slots: {} };
   for (let i = 0; i < MAX_MODELS; i++) {
     const w = slotWidgets(node, i);
     const tv = w.type?.value;
     st.slots[i] = {
-      type: (tv === "未使用") ? "未使用" : normalizeType(tv),
+      // 新节点：「未使用」（schema 默认）→「其他」自动识别；其它值归一化（含旧版分类名映射）
+      type: (tv === "未使用") ? "其他" : normalizeType(tv),
       folder: w.folder?.value || "",
       name: w.name?.value || "(未选择)",
       files: [],
@@ -1632,6 +1633,10 @@ function setupModelLoaderNode(node) {
           if (w.type) w.type.value = "其他";
         }
         applySlotVisibility(node);
+        // 预刷新下一个下拉的模型选项（选好当前模型后，新出现的下拉立即可选）
+        if (i + 1 < MAX_MODELS && v && v !== "(未选择)" && v !== "(无文件)") {
+          refreshSlotFileOptions(node, i + 1);
+        }
         configDirty();
       };
     }
