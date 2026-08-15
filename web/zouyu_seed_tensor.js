@@ -104,6 +104,7 @@ const COMBOS = {
   canvas_mode: { keys: ["auto", "max", "custom"], zh: ["自动", "最大", "自定义"], en: ["Auto", "Max", "Custom"] },
   ref_image_size: { keys: ["match", "max"], zh: ["匹配画布", "短边2048"], en: ["Match", "Max(2048)"] },
   crop_mode: { keys: ["disabled", "center", "contain"], zh: ["不裁剪", "居中裁剪", "等比填充"], en: ["Disabled", "Center", "Contain"] },
+  unload_mode: { keys: ["彻底卸载", "卸载到内存"], zh: ["彻底卸载", "卸载到内存"], en: ["Unload (Disk)", "Unload (RAM)"] },
 };
 
 const BOOL_LABELS = {
@@ -514,10 +515,11 @@ function makePortName(zh, d, ordinal) {
   return cls ? `${name}${ordinal} (${cls})` : `${name}${ordinal}`;
 }
 
+// 状态文字保持简短（避免与下拉内文件名文字重叠），位置提示由灯 tooltip 展示
 const STATE_INFO = {
-  gpu: { zh: "已加载 (显存)", en: "Loaded (VRAM)", color: "#4caf50" },
-  cpu: { zh: "未加载 (内存)", en: "Not loaded (RAM)", color: "#2196f3" },
-  free: { zh: "已卸载 (硬盘)", en: "Unloaded (Disk)", color: "#f44336" },
+  gpu: { zh: "已加载", en: "Loaded", color: "#4caf50" },
+  cpu: { zh: "未加载", en: "Not loaded", color: "#2196f3" },
+  free: { zh: "已卸载", en: "Unloaded", color: "#f44336" },
   unknown: { zh: "未知", en: "Unknown", color: "#9e9e9e" },
 };
 
@@ -1705,6 +1707,15 @@ function setupModelSwitchNode(node) {
       applySwitchSubtitle(node);
     };
   }
+  // 『卸载方式』下拉 → 卸载副标题实时更新（卸载到内存 / 彻底卸载）
+  const umW = node.widgets?.find((w) => w.name === "unload_mode");
+  if (umW) {
+    const orig = umW.callback;
+    umW.callback = (v) => {
+      if (orig) orig.call(umW, v);
+      applySwitchSubtitle(node);
+    };
+  }
   applySwitchSubtitle(node);
 
   // 模型下拉：只显示加载器中已配置的模型（美化标签），并在加载器执行后自动刷新
@@ -1716,14 +1727,23 @@ function setupModelSwitchNode(node) {
   setTimeout(() => applySwitchSubtitle(node), 600);
 }
 
-/** 开关副标题：加载 / 卸载。 */
+/** 开关副标题：加载 / 卸载到内存 / 彻底卸载。 */
 function applySwitchSubtitle(node) {
   if (!node) return;
   const zh = node.__zouyuLang !== "English";
   const aw = node.widgets?.find((w) => w.name === "action");
   const on = !!(aw && aw.value);
   const base = zh ? "模型加载开关" : "Model Load Switch";
-  node.title = base + (on ? (zh ? " · 加载" : " · Load") : (zh ? " · 卸载" : " · Unload"));
+  let suffix;
+  if (on) {
+    suffix = zh ? " · 加载" : " · Load";
+  } else {
+    const um = node.widgets?.find((w) => w.name === "unload_mode")?.value;
+    suffix = um === "卸载到内存"
+      ? (zh ? " · 卸载到内存" : " · Unload RAM")
+      : (zh ? " · 彻底卸载" : " · Unload Disk");
+  }
+  node.title = base + suffix;
   app.graph?.setDirtyCanvas(true, true);
 }
 
