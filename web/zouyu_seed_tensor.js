@@ -701,8 +701,12 @@ async function refreshSlotFileOptions(node, i) {
     );
     s.files = (d.files || []).length ? d.files : [];
     w.options = w.options || {};
-    // 选项始终包含「(未选择)」占位符，避免下拉当前值不在选项中而被框架自动改成第一个模型
+    // 选项始终包含「(未选择)」占位符与当前已选值，避免下拉值不在选项中
+    // 而被框架重置或前端校验报「输入值不可用」
     w.options.values = ["(未选择)", ...(s.files.length ? s.files : [])];
+    if (s.name && s.name !== "(未选择)" && s.name !== "(无文件)" && !s.files.includes(s.name)) {
+      w.options.values.push(s.name);
+    }
     // 未选择（占位符）保持不动，避免把下拉自动填成第一个文件；
     // 只有当前值已失效时才回退到第一个可用文件
     if (w.value !== "(未选择)" && w.value !== "(无文件)" && !s.files.includes(w.value)) {
@@ -1302,10 +1306,16 @@ function applySlotVisibility(node) {
     const w = slotWidgets(node, i);
     const visible = i < count;
     const s = st.slots[i] || (st.slots[i] = { type: "其他", folder: "", name: "(未选择)", files: [] });
-    // 「未使用」槽位兜底：强制清空残留 name，避免旧工作流自动填充的模型名被显示/加载
-    if (s.type === "未使用" && s.name !== "(未选择)" && s.name !== "(无文件)") {
-      s.name = "(未选择)";
-      if (w.name) w.name.value = "(未选择)";
+    // 「未使用」槽位：已选模型 → 自动启用为「其他」（自动识别），防止配置被清空丢失；
+    // 未选模型 → 保持空（清掉旧工作流自动填充的残留文件名）
+    if (s.type === "未使用") {
+      if (s.name && s.name !== "(未选择)" && s.name !== "(无文件)") {
+        s.type = "其他";
+        if (w.type) w.type.value = "其他";
+      } else {
+        s.name = "(未选择)";
+        if (w.name && w.name.value !== "(未选择)") w.name.value = "(未选择)";
+      }
     }
     const filled = !!s.name && s.name !== "(未选择)" && s.name !== "(无文件)" && s.type !== "未使用";
     // 简洁模式：类型/文件夹控件隐藏（类型自动识别、文件夹用行下按钮），只显示「请加载模型」文件下拉
@@ -1593,6 +1603,12 @@ function setupModelLoaderNode(node) {
       w.name.callback = (v) => {
         if (origNameCb) origNameCb.call(w.name, v);
         s.name = v;
+        // 用户在「未使用」槽位选模型 → 自动启用该槽位（类型改为「其他」= 自动识别），
+        // 避免配置被当作「未使用」清空丢失
+        if (s.type === "未使用" && v && v !== "(未选择)" && v !== "(无文件)") {
+          s.type = "其他";
+          if (w.type) w.type.value = "其他";
+        }
         applySlotVisibility(node);
         configDirty();
       };

@@ -566,7 +566,7 @@ def all_model_files():
         for dirpath, dirnames, filenames in os.walk(models_root):
             rel = os.path.relpath(dirpath, models_root)
             depth = 0 if rel == "." else rel.count(os.sep) + 1
-            if depth > 4:
+            if depth > 6:
                 dirnames[:] = []
                 continue
             for fn in filenames:
@@ -718,7 +718,7 @@ def list_files(category, folder):
                 for dirpath, dirnames, filenames in os.walk(models_root):
                     rel = os.path.relpath(dirpath, models_root)
                     depth = 0 if rel == "." else rel.count(os.sep) + 1
-                    if depth > 4:
+                    if depth > 6:
                         dirnames[:] = []
                         continue
                     for fn in filenames:
