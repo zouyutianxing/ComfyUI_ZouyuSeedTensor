@@ -104,7 +104,6 @@ const COMBOS = {
   canvas_mode: { keys: ["auto", "max", "custom"], zh: ["自动", "最大", "自定义"], en: ["Auto", "Max", "Custom"] },
   ref_image_size: { keys: ["match", "max"], zh: ["匹配画布", "短边2048"], en: ["Match", "Max(2048)"] },
   crop_mode: { keys: ["disabled", "center", "contain"], zh: ["不裁剪", "居中裁剪", "等比填充"], en: ["Disabled", "Center", "Contain"] },
-  unload_mode: { keys: ["彻底卸载", "卸载到内存"], zh: ["彻底卸载", "卸载到内存"], en: ["Unload (Disk)", "Unload (RAM)"] },
 };
 
 const BOOL_LABELS = {
@@ -488,8 +487,8 @@ function addButton(node, keyZh, keyEn, onClick) {
 const MAX_MODELS = 8;
 const TYPE_KEYS = { 主模型: "main", 文本模型: "clip", 视频VAE: "vae", 音频VAE: "avae", LoRA: "lora", 其他: "other" };
 const TYPE_CATEGORY = { 主模型: "diffusion_models", 文本模型: "text_encoders", 视频VAE: "vae", 音频VAE: "vae", LoRA: "loras", 其他: "diffusion_models" };
-// 端口名 = 类型 + 序号 + 分类（功能十：端口名称用模型类型显示，并显示文本类/vae/lora 等分类）
-// TYPE_DISPLAY：按前端槽位类型（tkey）；DETECT_DISPLAY：按后端识别类型（unet/clip/vae/...）
+// 端口名 = 类型 + 序号（如 主模型0 / Main0），避免与行尾状态灯/文字重叠；
+// 完整分类（Diffusion/CLIP/VAE 等）与位置提示由灯悬停 tooltip 展示
 const TYPE_DISPLAY = {
   main: { zh: "主模型", en: "Main", clsZh: "Diffusion", clsEn: "Diffusion" },
   clip: { zh: "文本模型", en: "Text", clsZh: "CLIP", clsEn: "CLIP" },
@@ -510,9 +509,7 @@ const DETECT_DISPLAY = {
 };
 
 function makePortName(zh, d, ordinal) {
-  const name = zh ? d.zh : d.en;
-  const cls = zh ? d.clsZh : d.clsEn;
-  return cls ? `${name}${ordinal} (${cls})` : `${name}${ordinal}`;
+  return `${zh ? d.zh : d.en}${ordinal}`;
 }
 
 // 状态文字保持简短（避免与下拉内文件名文字重叠），位置提示由灯 tooltip 展示
@@ -599,7 +596,7 @@ const ZOUYU_OVERLAY_STYLE = `
 .zouyu-loader-node .lg-slot--output{height:0 !important;margin:0 !important;padding:0 !important;overflow:visible !important}
 .zouyu-loader-node .lg-slot--output [data-slot-key]{position:relative;z-index:22;cursor:crosshair}
 .zouyu-loader-overlay{position:absolute;inset:0;pointer-events:none;z-index:10}
-.zouyu-row-tail{position:absolute;right:20px;display:flex;align-items:center;gap:6px;pointer-events:none;transform:translateY(-50%)}
+.zouyu-row-tail{position:absolute;right:74px;display:flex;align-items:center;gap:6px;pointer-events:none;transform:translateY(-50%)}
 .zouyu-rt-light{width:12px;height:12px;border-radius:50%;border:1px solid rgba(0,0,0,.45);box-shadow:0 0 4px rgba(0,0,0,.5);display:inline-block;background:#9e9e9e}
 .zouyu-rt-text{font-size:10px;line-height:14px;color:#9a9a9a;white-space:nowrap}
 .zouyu-rt-type{font-size:10px;line-height:14px;color:#c9a05f;background:rgba(0,0,0,.4);padding:0 4px;border-radius:3px;white-space:nowrap}
@@ -1143,8 +1140,8 @@ function layoutLegacyLoader(node) {
   try { node.arrange(); } catch (e) { /* 忽略 */ }
   const count = visibleSlotCount(st);
   const H = LiteGraph.NODE_WIDGET_HEIGHT;
-  // 下拉控件宽度收窄，行尾留出空间给三色灯 + 状态文字（避免与下拉内文件名文字重叠）
-  const namePad = 96;
+  // 下拉控件宽度收窄，行尾留出空间给 状态文字+三色灯+端口名（避免重叠）
+  const namePad = 150;
   for (let i = 0; i < MAX_MODELS; i++) {
     const nameW = slotWidgets(node, i).name;
     if (nameW) nameW.width = Math.max(60, node.size[0] - namePad);
@@ -1183,8 +1180,9 @@ function slotRowCenterY(nameW, H) {
   return (nameW.y != null ? nameW.y : 0) + h / 2;
 }
 
-/** 画布绘制：行尾 = 三色状态灯 + 状态文字（与下拉同一水平线，位于最右端口旁）。
- *  每个可见下拉行都绘制灯：未选模型=灰色「未选择」，已选模型=按状态三色（绿=已加载/显存、蓝=未加载/内存、红=已卸载/硬盘）。 */
+/** 画布绘制：行尾 = 三色状态灯 + 状态文字（与下拉同一水平线）。
+ *  布局：下拉 → 状态文字（右对齐 W-80）→ 灯（W-66）→ 端口名（W-56 起，类型+序号）→ 端口点（W-8）。
+ *  每个可见下拉行都绘制灯：未选模型=灰色「未选择」，已选模型=按状态三色。 */
 function drawLegacyOverlay(node, ctx) {
   const st = node.__zouyuSlotState;
   if (!st || !ctx) return;
@@ -1210,20 +1208,20 @@ function drawLegacyOverlay(node, ctx) {
       color = (info && info.color) || "#9e9e9e";
       text = zh ? (info && info.zh) || "未知" : (info && info.en) || "Unknown";
     }
-    // 三色灯
+    // 状态文字（右对齐，端口名左侧）
+    ctx.font = "10px sans-serif";
+    ctx.fillStyle = "#c8c8c8";
+    ctx.textAlign = "right";
+    ctx.fillText(text, W - 86, y);
+    ctx.textAlign = "left";
+    // 三色灯（状态文字与端口名之间）
     ctx.beginPath();
-    ctx.arc(W - 24, y, 6, 0, Math.PI * 2);
+    ctx.arc(W - 70, y, 6, 0, Math.PI * 2);
     ctx.fillStyle = color;
     ctx.fill();
     ctx.strokeStyle = "rgba(0,0,0,.5)";
     ctx.lineWidth = 1;
     ctx.stroke();
-    // 状态文字（灯光旁边）
-    ctx.font = "10px sans-serif";
-    ctx.fillStyle = "#c8c8c8";
-    ctx.textAlign = "right";
-    ctx.fillText(text, W - 40, y);
-    ctx.textAlign = "left";
   }
   ctx.restore();
 }
@@ -1707,15 +1705,6 @@ function setupModelSwitchNode(node) {
       applySwitchSubtitle(node);
     };
   }
-  // 『卸载方式』下拉 → 卸载副标题实时更新（卸载到内存 / 彻底卸载）
-  const umW = node.widgets?.find((w) => w.name === "unload_mode");
-  if (umW) {
-    const orig = umW.callback;
-    umW.callback = (v) => {
-      if (orig) orig.call(umW, v);
-      applySwitchSubtitle(node);
-    };
-  }
   applySwitchSubtitle(node);
 
   // 模型下拉：只显示加载器中已配置的模型（美化标签），并在加载器执行后自动刷新
@@ -1727,23 +1716,14 @@ function setupModelSwitchNode(node) {
   setTimeout(() => applySwitchSubtitle(node), 600);
 }
 
-/** 开关副标题：加载 / 卸载到内存 / 彻底卸载。 */
+/** 开关副标题：加载 / 卸载（卸载深度由加载器的低显存模式开关决定）。 */
 function applySwitchSubtitle(node) {
   if (!node) return;
   const zh = node.__zouyuLang !== "English";
   const aw = node.widgets?.find((w) => w.name === "action");
   const on = !!(aw && aw.value);
   const base = zh ? "模型加载开关" : "Model Load Switch";
-  let suffix;
-  if (on) {
-    suffix = zh ? " · 加载" : " · Load";
-  } else {
-    const um = node.widgets?.find((w) => w.name === "unload_mode")?.value;
-    suffix = um === "卸载到内存"
-      ? (zh ? " · 卸载到内存" : " · Unload RAM")
-      : (zh ? " · 彻底卸载" : " · Unload Disk");
-  }
-  node.title = base + suffix;
+  node.title = base + (on ? (zh ? " · 加载" : " · Load") : (zh ? " · 卸载" : " · Unload"));
   app.graph?.setDirtyCanvas(true, true);
 }
 

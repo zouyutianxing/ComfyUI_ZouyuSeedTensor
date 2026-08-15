@@ -352,26 +352,14 @@ def _slot_label(kind, zh, e=None, cfg=None):
     return kind
 
 
-def unload_to_ram(patcher):
-    """把模型从显存卸载到 CPU 内存（官方模型管理的标准行为），权重保留在 RAM。"""
-    try:
-        model_management.unload_model_and_clones(patcher)
-        return True
-    except Exception:
-        try:
-            model_management.free_memory(1e30, model_management.get_torch_device())
-            return True
-        except Exception:
-            return False
+def load_or_unload_model(kind, do_load, zh):
+    """模型加载开关：按信号执行 加载 / 卸载。
 
-
-def load_or_unload_model(kind, mode, zh):
-    """模型加载开关：按 加载 / 卸载到内存 / 彻底卸载 执行，返回说明文字。
-
-    mode ∈ {"load", "ram", "disk"}：
-    - load ：从硬盘/内存把模型加载进显存（绿色）；
-    - ram  ：仅从显存卸载到 CPU 内存（官方行为，蓝色，权重保留在 RAM）；
-    - disk ：彻底卸载（显存 + DynamicVRAM 再释放 CPU 内存，红色）。
+    卸载深度由「模型加载器」的低显存模式开关决定（加载器执行时 set_switch 登记）：
+    - 低显存模式开启（彻底卸载）：卸载信号 → 把模型从显存+CPU内存彻底卸载（DynamicVRAM 模型
+      可释放内存，红色「已卸载」）；
+    - 低显存模式关闭（CPU缓存）：不主动卸载，交给官方模型管理负责（官方把模型从显存卸载到
+      CPU 内存，蓝色「未加载」，权重保留在内存）。
     优先操作已登记（执行过加载器）的模型对象；只有配置未运行时：
     - 加载 → 直接从配置的文件加载并登记；
     - 卸载 → 提示尚未加载。
@@ -384,15 +372,20 @@ def load_or_unload_model(kind, mode, zh):
                 if zh else "model {} not found (configure it in the loader first)".format(kind))
     name = (e or cfg).get("name", "") or kind
     label = _slot_label(kind, zh, e=e, cfg=cfg)
-    if mode == "load":
+    if do_load:
         if e is not None:
             return _do_load_model(e, name, label, zh)
         return _do_load_config(kind, cfg, name, label, zh)
-    # 卸载（ram=卸载到内存 / disk=彻底卸载）
-    if e is not None:
-        return _do_unload_model(e, mode, name, label, zh)
-    return ("{} 尚未加载（未运行加载器），无需卸载".format(label)
-            if zh else "{} not loaded yet (loader not run), nothing to unload".format(label))
+    # 卸载：卸载深度由加载器的低显存模式开关决定
+    if e is None:
+        return ("{} 尚未加载（未运行加载器），无需卸载".format(label)
+                if zh else "{} not loaded yet (loader not run), nothing to unload".format(label))
+    if get_switch():
+        # 低显存模式：彻底卸载（显存 + CPU 内存）
+        return _do_unload_model(e, name, label, zh)
+    # CPU缓存模式：不主动卸载，交官方模型管理（官方卸载到 CPU 内存）
+    return ("{} CPU缓存模式下不主动卸载，由官方模型管理负责（模型将卸载到 CPU 内存）".format(label)
+            if zh else "{} CPU-cache mode: no manual unload, handled by official model manager (RAM)".format(label))
 
 
 def _do_load_config(kind, cfg, name, label, zh):
@@ -439,27 +432,12 @@ def _do_load_model(e, name, label, zh):
                 if zh else "reload {} failed: {}".format(name, str(exc)[:80]))
 
 
-def _do_unload_model(e, mode, name, label, zh):
-    """卸载模型：mode="ram"=仅卸载到 CPU 内存（官方行为，蓝）；mode="disk"=彻底卸载（显存+内存，红）。"""
+def _do_unload_model(e, name, label, zh):
+    """彻底卸载（低显存模式）：从显存卸载到 CPU，DynamicVRAM 模型再释放 CPU 内存。"""
     kind = e["kind"]
     patcher = e.get("patcher")
     if patcher is None:
         return ("{} 无可用模型对象".format(label) if zh else "{} no model object".format(label))
-    if mode == "ram":
-        ok = unload_to_ram(patcher)
-        with _LOCK:
-            cur = _REGISTRY["models"].get(kind)
-            if cur is not None:
-                cur["state"] = residency(patcher)
-                cur["ts"] = _now()
-        st = residency(patcher)
-        if st == "cpu":
-            return ("已卸载 {} 至 CPU 内存（官方行为）".format(label)
-                    if zh else "unloaded {} to RAM (official behavior)".format(label))
-        return ("已卸载 {} 至 CPU 内存".format(label)
-                if zh else "unloaded {} to RAM".format(label)) if ok else \
-            ("卸载 {} 失败".format(label) if zh else "unload {} failed".format(label))
-    # disk：彻底卸载
     freed = fully_unload_patcher(patcher)
     with _LOCK:
         cur = _REGISTRY["models"].get(kind)
@@ -807,10 +785,9 @@ def list_model_dirs(rel=""):
 
 
 def slot_action(kind, action):
-    """手动控制槽位模型：action ∈ {"load", "ram", "disk"}，返回说明文字。"""
-    if action not in ("load", "ram", "disk"):
-        action = "disk"
-    msg = load_or_unload_model(kind, action, True)
+    """手动控制槽位模型：action ∈ {"load", "unload"}，返回说明文字（卸载深度由加载器低显存模式决定）。"""
+    do_load = action == "load"
+    msg = load_or_unload_model(kind, do_load, True)
     log_event(msg)
     return msg
 
@@ -909,12 +886,12 @@ def register_routes():
 
     @routes.post("/zouyu_model_loader/slot_action")
     async def _slot_action(request):
-        """手动加载/卸载指定槽位模型。body: {"kind": "slot0", "action": "load"|"ram"|"disk"}"""
+        """手动加载/卸载指定槽位模型。body: {"kind": "slot0", "action": "load"|"unload"}"""
         try:
             data = await request.json()
             kind = str(data.get("kind") or "")
             action = str(data.get("action") or "")
-            if not kind.startswith("slot") or action not in ("load", "ram", "disk"):
+            if not kind.startswith("slot") or action not in ("load", "unload"):
                 return web.json_response({"ok": False, "error": "bad params"}, status=400)
             msg = slot_action(kind, action)
             return web.json_response({"ok": True, "message": msg})
@@ -983,21 +960,18 @@ class ZouyuModelSwitch(io.ComfyNode):
             description=(
                 "导线式信号检测：左右各一个端口（* 任意类型），可插入任何插件之间的连线，"
                 "信号直接透传。当检测到信号（数据）经过本节点时，按『动作』开关执行任务——"
-                "打开（加载）：把下拉所选模型加载进显存/CPU内存；关闭（卸载）：按『卸载方式』执行——"
-                "『彻底卸载』把模型从显存与CPU内存完全卸载（红，DynamicVRAM 模型可释放内存）；"
-                "『卸载到内存』仅把模型从显存卸载到 CPU 内存（蓝，官方标准行为，权重保留在内存）。"
+                "打开（加载）：把下拉所选模型加载进显存/CPU内存；关闭（卸载）：向模型加载器发送卸载信号，"
+                "由加载器的『低显存模式』开关决定卸载深度——低显存（彻底卸载）：把模型从显存与CPU内存彻底卸载；"
+                "CPU缓存：不主动卸载，交官方模型管理（卸载到 CPU 内存）。"
                 "模型下拉自动识别模型加载器在界面上已配置的模型（无需先运行加载器）。"
-                "副标题实时显示当前动作（加载/卸载到内存/彻底卸载）。"
+                "副标题实时显示当前动作（加载/卸载）。"
             ),
             inputs=[
                 io.AnyType.Input("signal", optional=True, tooltip="信号输入（任意类型，直接透传；有数据经过时触发任务）"),
                 io.Combo.Input("model", options=configured_model_options(), default="(未选择)",
                                tooltip="选择要控制的模型（自动列出模型加载器已配置的槽位）"),
                 io.Boolean.Input("action", default=True, label_on="加载", label_off="卸载",
-                                 tooltip="加载=信号经过时把模型加载进显存；卸载=信号经过时按『卸载方式』执行卸载"),
-                io.Combo.Input("unload_mode", options=["彻底卸载", "卸载到内存"], default="彻底卸载",
-                               tooltip="卸载方式：彻底卸载=显存+CPU内存全部释放（DynamicVRAM 模型显示红色『已卸载』）；"
-                                       "卸载到内存=仅显存→CPU内存（官方标准行为，显示蓝色『未加载』）"),
+                                 tooltip="加载=信号经过时把模型加载进显存；卸载=信号经过时向加载器发送卸载信号（深度由加载器低显存模式决定）"),
                 io.Combo.Input("language", options=["中文", "English"], default="中文"),
             ],
             outputs=[
@@ -1006,16 +980,14 @@ class ZouyuModelSwitch(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, signal=None, model="(未选择)", action=True, unload_mode="彻底卸载",
-                language="中文") -> io.NodeOutput:
+    def execute(cls, signal=None, model="(未选择)", action=True, language="中文") -> io.NodeOutput:
         zh = (language != "English")
         # 信号检测：只有真正有数据经过（signal 非空）才触发加载/卸载任务
         if signal is None:
             text = ("无信号经过：仅透传" if zh else "no signal: pass-through only")
             return io.NodeOutput(signal, ui={"text": [text]})
         if model and model != "(未选择)":
-            mode = "load" if bool(action) else ("ram" if str(unload_mode or "") == "卸载到内存" else "disk")
-            msg = load_or_unload_model(model, mode, zh)
+            msg = load_or_unload_model(model, bool(action), zh)
             log_event(msg)
             text = msg
         else:

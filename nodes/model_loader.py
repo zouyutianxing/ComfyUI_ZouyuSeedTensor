@@ -198,8 +198,11 @@ class ZouyuModelLoader(io.ComfyNode):
                              tooltip="关闭（简洁，默认）：只显示模型下拉/三色灯/加载提示/端口/低显存/语言/本开关，"
                                      "其余全部隐藏，界面自动收缩；打开（完整）：额外显示每个下拉下方的模型文件夹选择、"
                                      "手动加载/卸载按钮与底部拖入导入条"),
-            io.Boolean.Input("low_vram_mode", default=False, label_on="彻底卸载", label_off="CPU缓存",
-                             optional=True, tooltip="开启=极低显存：模型空闲时从显存+CPU内存彻底卸载；关闭=官方管理卸载到CPU内存"),
+            io.Boolean.Input("low_vram_mode", default=False, label_on="低显存", label_off="CPU缓存",
+                             optional=True,
+                             tooltip="卸载深度控制：低显存=收到模型加载开关的卸载信号时，把对应模型从显存+CPU内存彻底卸载至硬盘"
+                                     "（DynamicVRAM 模型释放内存，红『已卸载』）；CPU缓存=不主动控制卸载，完全交给官方模型管理"
+                                     "（官方把模型从显存卸载到 CPU 内存，蓝『未加载』，权重保留在内存）"),
             io.Combo.Input("language", options=["中文", "English"], default="中文", optional=True),
         ])
         outputs = [io.AnyType.Output("model_{}".format(i)) for i in range(MAX_MODELS)]
