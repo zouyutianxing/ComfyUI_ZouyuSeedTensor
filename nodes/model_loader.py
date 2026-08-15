@@ -237,6 +237,9 @@ class ZouyuModelLoader(io.ComfyNode):
         slots = []
         for i in range(MAX_MODELS):
             t = kwargs.get("model_{}_type".format(i)) or "未使用"
+            # 旧版工作流分类名（diffusion_models/text_encoders/vae 等）或未知值 → 按「其他」自动识别
+            if t not in TYPE_KEY:
+                t = "其他"
             name = kwargs.get("model_{}_name".format(i)) or ""
             # 类型为「未使用」的空槽位：即使 name 有旧工作流残留值也跳过（不加载）
             if t == "未使用":

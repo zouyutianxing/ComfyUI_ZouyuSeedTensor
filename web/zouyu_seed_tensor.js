@@ -486,6 +486,23 @@ function addButton(node, keyZh, keyEn, onClick) {
 
 const MAX_MODELS = 8;
 const TYPE_KEYS = { 主模型: "main", 文本模型: "clip", 视频VAE: "vae", 音频VAE: "avae", LoRA: "lora", 其他: "other" };
+const VALID_TYPES = ["未使用", "主模型", "文本模型", "视频VAE", "音频VAE", "LoRA", "其他"];
+// 旧版本加载器（unet_folder/clip_name/vae_name 结构）工作流加载时，
+// 分类名会错位填入 model_i_type：这里把旧分类名映射为当前有效类型，避免「输入值不可用」报错
+const LEGACY_TYPE_MAP = {
+  "diffusion_models": "主模型", "unet": "主模型", "checkpoints": "主模型", "checkpoint": "主模型", "main": "主模型",
+  "text_encoders": "文本模型", "clip": "文本模型", "text": "文本模型",
+  "vae": "视频VAE", "video_vae": "视频VAE",
+  "audio_vae": "音频VAE",
+  "loras": "LoRA", "lora": "LoRA",
+  "default": "其他", "null": "其他", "": "其他",
+};
+function normalizeType(tv) {
+  if (!tv) return "其他";
+  if (VALID_TYPES.includes(tv)) return tv;
+  if (LEGACY_TYPE_MAP[tv] !== undefined) return LEGACY_TYPE_MAP[tv];
+  return "其他"; // 未知值 → 自动识别
+}
 const TYPE_CATEGORY = { 主模型: "diffusion_models", 文本模型: "text_encoders", 视频VAE: "vae", 音频VAE: "vae", LoRA: "loras", 其他: "diffusion_models" };
 // 端口名 = 类型 + 序号（如 主模型0 / Main0），避免与行尾状态灯/文字重叠；
 // 完整分类（Diffusion/CLIP/VAE 等）与位置提示由灯悬停 tooltip 展示
@@ -1106,7 +1123,9 @@ function syncStateFromWidgets(node) {
     // 类型：「未使用」=空槽位（即使 name 有残留值也不显示/不加载，兼容旧工作流）；
     // 其它明确类型或「其他」（自动识别）视为已启用；旧工作流中用户明确选过类型则尊重
     const tv = w.type?.value;
-    st.slots[i].type = (tv === "未使用") ? "未使用" : ((tv && tv !== "未使用") ? tv : "其他");
+    // 类型归一化：「未使用」保留；旧版工作流分类名（diffusion_models/text_encoders/vae 等）映射为有效类型；
+    // 未知值 → 「其他」（自动识别）
+    st.slots[i].type = (tv === "未使用") ? "未使用" : normalizeType(tv);
     st.slots[i].folder = w.folder?.value || "";
     st.slots[i].name = w.name?.value || "(未选择)";
     // 「未使用」槽位强制清空残留 name（旧工作流曾被自动填充的模型名），
@@ -1559,7 +1578,7 @@ function setupModelLoaderNode(node) {
     const w = slotWidgets(node, i);
     const tv = w.type?.value;
     st.slots[i] = {
-      type: (tv && tv !== "未使用") ? tv : "其他",
+      type: (tv === "未使用") ? "未使用" : normalizeType(tv),
       folder: w.folder?.value || "",
       name: w.name?.value || "(未选择)",
       files: [],
@@ -1591,8 +1610,11 @@ function setupModelLoaderNode(node) {
       if (v !== "未使用") {
         s.folder = TYPE_CATEGORY[v] || "";
         if (w.folder) w.folder.value = s.folder;
-        s.name = "(未选择)";
-        if (w.name) w.name.value = "(未选择)";
+        // 仅当尚未选模型时才清空；已选模型保持不变（防止框架触发 type 回调时配置丢失）
+        if (!s.name || s.name === "(未选择)" || s.name === "(无文件)") {
+          s.name = "(未选择)";
+          if (w.name) w.name.value = "(未选择)";
+        }
         refreshSlotFileOptions(node, i);
       }
       applySlotVisibility(node);
