@@ -223,12 +223,6 @@ function applyLanguage(node, lang) {
       w.name = w.label;
       continue;
     }
-    if (w.__zouyuSlotAction) {
-      // 手动加载/卸载按钮：文字按当前模型状态（refreshStatusDOM 同步更新）
-      const m = String(w.__zouyuSlotBtn || "").match(/^action_(\d+)$/);
-      if (m) updateActionBtnLabel(node, Number(m[1]));
-      continue;
-    }
     if (w.name === "language") {
       w.value = lang;
       const entry = LABELS[w.name];
@@ -558,8 +552,6 @@ async function refreshStatusDOM(node) {
       if (info.tag && m?.type) {
         info.tag.textContent = zh ? m.type_zh : m.type_en;
       }
-      const sm = String(kind || "").match(/^slot(\d+)$/);
-      if (sm) updateActionBtnLabel(node, Number(sm[1]));
     }
     if (node.comfyClass === "ZouyuModelSwitch") {
       // 开关节点的标题副文案由 action 决定，无需在此刷新；模型下拉由 loaders 执行事件刷新
@@ -827,23 +819,9 @@ function updateRowButtons(node, overlay, i, rowCY, visible, zh) {
     folderBtn.setAttribute("data-zouyu-folder", String(i));
     folderBtn.addEventListener("click", (e) => { e.stopPropagation(); openFolderBrowser(node, i); });
     bar.appendChild(folderBtn);
-    const actBtn = document.createElement("button");
-    actBtn.type = "button";
-    actBtn.className = "zouyu-btn";
-    actBtn.setAttribute("data-zouyu-act", String(i));
-    actBtn.addEventListener("click", (e) => { e.stopPropagation(); slotActionClick(node, i); });
-    bar.appendChild(actBtn);
   }
   const folderBtn = bar.querySelector(`[data-zouyu-folder="${i}"]`);
-  const actBtn = bar.querySelector(`[data-zouyu-act="${i}"]`);
   if (folderBtn) folderBtn.textContent = zh ? "📁 模型文件夹" : "📁 Model Folder";
-  if (actBtn) {
-    const info = node.__zouyuStatus && node.__zouyuStatus[`slot${i}`];
-    const state = (info && info.state) || "unknown";
-    actBtn.textContent = (state === "gpu" || state === "cpu")
-      ? (zh ? "⤒ 卸载" : "⤒ Unload")
-      : (zh ? "⤓ 加载" : "⤓ Load");
-  }
   bar.style.top = (rowCY != null ? rowCY : 12) + "px";
 }
 
@@ -1163,6 +1141,12 @@ function layoutLegacyLoader(node) {
   try { node.arrange(); } catch (e) { /* 忽略 */ }
   const count = visibleSlotCount(st);
   const H = LiteGraph.NODE_WIDGET_HEIGHT;
+  // 下拉控件宽度收窄，行尾留出空间给三色灯 + 状态文字（避免与下拉内文件名文字重叠）
+  const namePad = 96;
+  for (let i = 0; i < MAX_MODELS; i++) {
+    const nameW = slotWidgets(node, i).name;
+    if (nameW) nameW.width = Math.max(60, node.size[0] - namePad);
+  }
   for (let i = 0; i < MAX_MODELS; i++) {
     const out = node.outputs && node.outputs[i];
     if (!out) continue;
@@ -1251,27 +1235,21 @@ function legacyMouseDown(node, pos) {
 function setupLegacyLoaderLayout(node) {
   // 固定控件起始行：使 widget.y 不受输出端口 pos 影响（否则端口对齐会反作用于布局）
   node.widgets_start_y = 30;
-  // 每个槽位的下拉下方：模型文件夹选择开关 + 手动加载/卸载按钮（真实按钮，选中模型后显示）
+  // 每个槽位的下拉下方：模型文件夹选择开关（真实按钮，选中模型后显示）
+  // 说明：模型的加载/卸载由「模型加载控制开关」的信号自动控制，这里不提供手动加载按钮
   for (let i = 0; i < MAX_MODELS; i++) {
     const folderBtn = addButton(node, "📁 模型文件夹", "📁 Model Folder", () => openFolderBrowser(node, i));
     folderBtn.__zouyuSlotBtn = `folder_${i}`;
-    const actBtn = node.addWidget("button", "⤓ 加载", null, () => slotActionClick(node, i));
-    actBtn.serialize = false;
-    actBtn.__zouyuSlotBtn = `action_${i}`;
-    actBtn.__zouyuSlotAction = true;
   }
-  // 把按钮移动到对应 name 下拉之后（数组顺序决定控件行顺序：下拉 → 📁 文件夹 → 加载/卸载）
+  // 把文件夹按钮移动到对应 name 下拉之后（数组顺序决定控件行顺序：下拉 → 📁 文件夹）
   for (let i = 0; i < MAX_MODELS; i++) {
     const nameW = slotWidgets(node, i).name;
     const folderBtn = node.widgets?.find((w) => w.__zouyuSlotBtn === `folder_${i}`);
-    const actBtn = node.widgets?.find((w) => w.__zouyuSlotBtn === `action_${i}`);
-    if (!nameW || !folderBtn || !actBtn) continue;
-    for (const b of [folderBtn, actBtn]) {
-      const bi = node.widgets.indexOf(b);
-      if (bi >= 0) node.widgets.splice(bi, 1);
-    }
+    if (!nameW || !folderBtn) continue;
+    const bi = node.widgets.indexOf(folderBtn);
+    if (bi >= 0) node.widgets.splice(bi, 1);
     const ni = node.widgets.indexOf(nameW);
-    node.widgets.splice(ni + 1, 0, folderBtn, actBtn);
+    node.widgets.splice(ni + 1, 0, folderBtn);
   }
   node.onDrawForeground = (ctx) => {
     layoutLegacyLoader(node); // 每帧刷新端口 X（跟随节点宽度变化）
@@ -1320,12 +1298,10 @@ function applySlotVisibility(node) {
     setWidgetHidden(w.type, true);
     setWidgetHidden(w.folder, true);
     setWidgetHidden(w.name, !visible);
-    // 行下按钮（📁 文件夹 / 加载·卸载）：至少选过一个模型、且精简显示开关打开时显示
+    // 行下文件夹按钮：至少选过一个模型、且精简显示开关打开时显示
     const showBtn = visible && (filled || anyFilled) && showActions;
     const folderBtn = node.widgets?.find((x) => x.__zouyuSlotBtn === `folder_${i}`);
-    const actBtn = node.widgets?.find((x) => x.__zouyuSlotBtn === `action_${i}`);
     if (folderBtn) setWidgetHidden(folderBtn, !showBtn);
-    if (actBtn) setWidgetHidden(actBtn, !showBtn);
     if (w.type && w.type.value !== s.type) w.type.value = s.type;
     if (w.folder && w.folder.value !== s.folder) w.folder.value = s.folder;
     if (w.name && w.name.value !== s.name) w.name.value = s.name;
@@ -1338,7 +1314,29 @@ function applySlotVisibility(node) {
   if (importBar) setWidgetHidden(importBar, !showActions);
   syncLoaderOutputs(node);
   applyLoaderLayout(node);
+  fitNodeHeight(node); // 显隐变化后节点高度自动收缩（简洁模式）
   app.graph?.setDirtyCanvas(true, true);
+}
+
+/** 简洁模式下节点高度自动收缩：框架 _arrangeWidgets 只在内容超高时撑大节点、不会缩小，
+ *  这里基于可见控件计算内容高度并 setSize（在 applySlotVisibility 显隐变化后调用）。 */
+function fitNodeHeight(node) {
+  if (isVueMode() || !node.widgets) return;
+  try {
+    const H = LiteGraph.NODE_WIDGET_HEIGHT;
+    let l = node.widgets_start_y != null ? node.widgets_start_y : 30;
+    let any = false;
+    for (const w of node.widgets) {
+      if (w.hidden) continue;
+      any = true;
+      l += (w.computedHeight && w.computedHeight > 0 ? w.computedHeight : H) + 4;
+    }
+    if (!any) return;
+    l += 6;
+    if (Math.abs(node.size[1] - l) > 2) {
+      node.setSize([node.size[0], l]);
+    }
+  } catch (e) { /* ignore */ }
 }
 
 /** 输出端口与模型一一对应：按类型编号命名（主模型0 (Diffusion)/文本模型0 (CLIP)/...），端口文字显示类型+分类。 */
@@ -1374,43 +1372,6 @@ function applyLoaderLabels(node) {
     const w = slotWidgets(node, i);
     if (w.name) w.label = zh ? `请加载模型 ${i + 1}` : `Load model ${i + 1}`;
   }
-  for (let i = 0; i < MAX_MODELS; i++) {
-    updateActionBtnLabel(node, i);
-  }
-}
-
-/** 手动加载/卸载按钮文字：按当前模型状态显示 加载 或 卸载。 */
-function updateActionBtnLabel(node, i) {
-  const btn = node.widgets?.find((w) => w.__zouyuSlotBtn === `action_${i}`);
-  if (!btn) return;
-  const zh = node.__zouyuLang !== "English";
-  const info = node.__zouyuStatus && node.__zouyuStatus[`slot${i}`];
-  const state = (info && info.state) || "unknown";
-  btn.label = (state === "gpu" || state === "cpu")
-    ? (zh ? "⤒ 卸载" : "⤒ Unload")
-    : (zh ? "⤓ 加载" : "⤓ Load");
-  btn.name = btn.label;
-}
-
-/** 手动加载/卸载槽位模型（功能三：可从硬盘加载回显存/内存，或从显存+内存完全卸载）。 */
-async function slotActionClick(node, i) {
-  const st = node.__zouyuSlotState;
-  const s = st && st.slots[i];
-  if (!s || !s.name || s.name === "(未选择)" || s.name === "(无文件)") return;
-  const info = node.__zouyuStatus && node.__zouyuStatus[`slot${i}`];
-  const state = (info && info.state) || "unknown";
-  const doLoad = state !== "gpu" && state !== "cpu";
-  try {
-    await fetch("/zouyu_model_loader/slot_action", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind: `slot${i}`, action: doLoad ? "load" : "unload" }),
-    });
-  } catch (e) {
-    /* 服务端未就绪时忽略 */
-  }
-  refreshStatusDOM(node);
-  updateActionBtnLabel(node, i);
 }
 
 /**
