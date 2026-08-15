@@ -41,29 +41,37 @@ KIND_LABELS = {"unet": "UNET", "clip": "CLIP", "vae": "视频VAE", "audio_vae": 
 
 KIND_LABELS_EN = {"unet": "UNET", "clip": "CLIP", "vae": "Video VAE", "audio_vae": "Audio VAE"}
 
+# 槽位类型标签（含后端识别键 unet/checkpoint：加载器执行后按识别结果显示）
 SLOT_TYPE_LABELS = {
-    "main":  {"zh": "主模型",  "en": "Main"},
-    "clip":  {"zh": "文本模型", "en": "Text(CLIP)"},
-    "vae":   {"zh": "视频VAE", "en": "Video VAE"},
-    "avae":  {"zh": "音频VAE", "en": "Audio VAE"},
-    "lora":  {"zh": "LoRA",    "en": "LoRA"},
-    "other": {"zh": "其他",    "en": "Other"},
+    "main":      {"zh": "主模型",  "en": "Main"},
+    "unet":      {"zh": "主模型",  "en": "Main"},
+    "checkpoint": {"zh": "主模型", "en": "Main"},
+    "clip":      {"zh": "文本模型", "en": "Text(CLIP)"},
+    "vae":       {"zh": "视频VAE", "en": "Video VAE"},
+    "avae":      {"zh": "音频VAE", "en": "Audio VAE"},
+    "lora":      {"zh": "LoRA",    "en": "LoRA"},
+    "other":     {"zh": "其他",    "en": "Other"},
+    "unknown":   {"zh": "未知",    "en": "Unknown"},
 }
 
+# 三色状态灯：绿=已加载(显存) / 蓝=未加载(CPU内存，未被显存加载) / 红=已卸载(硬盘)
 STATE_INFO = {
-    "gpu":     {"zh": "已加载",     "en": "Loaded",      "color": "#4caf50"},
-    "cpu":     {"zh": "卸载至内存", "en": "In RAM",      "color": "#2196f3"},
-    "free":    {"zh": "未加载",     "en": "Not loaded",  "color": "#f44336"},
-    "unknown": {"zh": "未知",       "en": "Unknown",     "color": "#9e9e9e"},
+    "gpu":     {"zh": "已加载 (显存)",  "en": "Loaded (VRAM)",    "color": "#4caf50"},
+    "cpu":     {"zh": "未加载 (内存)",  "en": "Not loaded (RAM)", "color": "#2196f3"},
+    "free":    {"zh": "已卸载 (硬盘)",  "en": "Unloaded (Disk)",  "color": "#f44336"},
+    "unknown": {"zh": "未知",           "en": "Unknown",          "color": "#9e9e9e"},
 }
 
+# 模型类型 + 分类（端口名显示：类型 + 序号 + 分类，如「主模型0 (Diffusion)」）
 MODEL_TYPE_INFO = {
-    "unet":       {"zh": "主模型(Diffusion)",  "en": "Main (Diffusion)",  "color": "#b0722a"},
-    "checkpoint": {"zh": "主模型(Checkpoint)", "en": "Main (Checkpoint)", "color": "#b0722a"},
-    "clip":       {"zh": "文本模型(CLIP)",     "en": "Text (CLIP)",       "color": "#8f6f2f"},
-    "vae":        {"zh": "VAE 模型",           "en": "VAE",               "color": "#2f6b8f"},
-    "lora":       {"zh": "LoRA",               "en": "LoRA",              "color": "#7a4fa0"},
-    "unknown":    {"zh": "未知",               "en": "Unknown",           "color": "#9e9e9e"},
+    "unet":       {"zh": "主模型 (Diffusion)",  "en": "Main (Diffusion)",   "color": "#b0722a"},
+    "checkpoint": {"zh": "主模型 (Checkpoint)", "en": "Main (Checkpoint)",  "color": "#b0722a"},
+    "clip":       {"zh": "文本模型 (CLIP)",     "en": "Text (CLIP)",        "color": "#8f6f2f"},
+    "vae":        {"zh": "视频VAE (VAE)",       "en": "Video VAE (VAE)",    "color": "#2f6b8f"},
+    "avae":       {"zh": "音频VAE (VAE)",       "en": "Audio VAE (VAE)",    "color": "#2f6b8f"},
+    "lora":       {"zh": "LoRA (LoRA)",         "en": "LoRA",               "color": "#7a4fa0"},
+    "other":      {"zh": "其他",                "en": "Other",              "color": "#9e9e9e"},
+    "unknown":    {"zh": "未知",                "en": "Unknown",            "color": "#9e9e9e"},
 }
 
 
@@ -680,8 +688,33 @@ def _resolve_abs(slot_category, folder, name):
 
 def list_files(category, folder):
     """列出模型文件：folder 为分类名/空/"." 时返回分类根全部文件；
+    category="all" 时返回 models 目录下全部模型文件（去重纯文件名，供「请加载模型」初始下拉）；
     否则返回 models_root/folder 目录下的模型文件（相对该目录的路径）。"""
     if folder in ("", ".", category):
+        if category == "all":
+            files, seen = [], set()
+            cats = ["diffusion_models", "text_encoders", "vae", "loras", "checkpoints",
+                    "clip_vision", "style_models", "upscale_models", "controlnet", "gligen"]
+            for c in cats:
+                for f in folder_paths.get_filename_list(c):
+                    base = os.path.basename(f)
+                    if base not in seen:
+                        seen.add(base)
+                        files.append(base)
+            models_root = _models_root()
+            if models_root and os.path.isdir(models_root):
+                for dirpath, dirnames, filenames in os.walk(models_root):
+                    rel = os.path.relpath(dirpath, models_root)
+                    depth = 0 if rel == "." else rel.count(os.sep) + 1
+                    if depth > 4:
+                        dirnames[:] = []
+                        continue
+                    for fn in filenames:
+                        if os.path.splitext(fn)[1].lower() in folder_paths.supported_pt_extensions \
+                                and fn not in seen:
+                            seen.add(fn)
+                            files.append(fn)
+            return {"folder": folder or ".", "files": sorted(files)}
         return {"folder": folder or ".", "files": folder_paths.get_filename_list(category)}
     models_root = _models_root()
     base = _safe_join_soft(models_root, folder)
@@ -715,6 +748,36 @@ def find_folder(name):
         if len(hits) >= 20:
             break
     return {"found": hits}
+
+
+def list_model_dirs(rel=""):
+    """列出 models 根下 rel 相对路径的直接子目录（返回相对 models 根的路径列表）。
+
+    供前端「模型文件夹选择」弹窗逐级浏览 models 目录树使用。
+    rel="" 或 "." 表示 models 根目录。
+    """
+    models_root = _models_root()
+    if not models_root:
+        return {"root": "", "dirs": []}
+    base = _safe_join_soft(models_root, rel or ".")
+    if base is None or not os.path.isdir(base):
+        return {"root": rel or ".", "dirs": []}
+    dirs = []
+    for name in sorted(os.listdir(base)):
+        if name.startswith("."):
+            continue
+        p = os.path.join(base, name)
+        if os.path.isdir(p):
+            dirs.append(os.path.relpath(p, models_root).replace("\\", "/"))
+    return {"root": rel or ".", "dirs": dirs}
+
+
+def slot_action(kind, action):
+    """手动控制槽位模型：action ∈ {"load", "unload"}，返回说明文字（加载器 UI 按钮用）。"""
+    do_load = action == "load"
+    msg = load_or_unload_model(kind, do_load, True)
+    log_event(msg)
+    return msg
 
 
 async def import_folder_files(folder_name, file_parts):
@@ -764,11 +827,13 @@ async def import_folder_files(folder_name, file_parts):
 
 
 def reveal_path(path):
-    """在操作系统的文件资源管理器中打开（Windows explorer.exe）。"""
+    """在操作系统的文件资源管理器中打开（Windows explorer.exe）；path 为空时打开 models 根目录。"""
     try:
+        models_root = _models_root()
+        if not path:
+            path = models_root
         if not path:
             return {"ok": False, "error": "empty path"}
-        models_root = _models_root()
         target = os.path.abspath(path)
         if os.path.commonpath([models_root, target]) != models_root:
             return {"ok": False, "error": "path outside models root"}
@@ -801,6 +866,25 @@ def register_routes():
     @routes.get("/zouyu_model_loader/find_folder")
     async def _find_folder(request):
         return web.json_response(find_folder(request.query.get("name", "")))
+
+    @routes.get("/zouyu_model_loader/list_dirs")
+    async def _list_dirs(request):
+        """models 目录树浏览：返回 rel 路径下的直接子目录（相对 models 根）。"""
+        return web.json_response(list_model_dirs(request.query.get("path", ".")))
+
+    @routes.post("/zouyu_model_loader/slot_action")
+    async def _slot_action(request):
+        """手动加载/卸载指定槽位模型（加载器 UI 按钮）。body: {"kind": "slot0", "action": "load"|"unload"}"""
+        try:
+            data = await request.json()
+            kind = str(data.get("kind") or "")
+            action = str(data.get("action") or "")
+            if not kind.startswith("slot") or action not in ("load", "unload"):
+                return web.json_response({"ok": False, "error": "bad params"}, status=400)
+            msg = slot_action(kind, action)
+            return web.json_response({"ok": True, "message": msg})
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)[:200]}, status=400)
 
     @routes.get("/zouyu_model_loader/reveal")
     async def _reveal(request):
