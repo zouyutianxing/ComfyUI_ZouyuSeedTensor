@@ -22,20 +22,15 @@ from comfy.patcher_extension import CallbacksMP
 _LOCK = threading.RLock()
 
 _REGISTRY = {
-    "switch": False,      # 节点1 的低显存开关（True=极低显存，彻底卸载；False=交给官方管理）
+    "switch": False,      # 节点1 的低显存开关（True=低显存彻底卸载；False=CPU缓存，开关退化为转接点）
     "switch_ts": 0.0,
     "loader_ts": 0.0,     # 节点1 最近一次执行时间
     "models": {},         # kind -> {kind, name, obj, patcher, state, ts}  （加载器执行后登记）
     "configured": {},     # kind -> {kind, tkey, folder, name}               （前端推送的配置，未运行即可用）
-    "watched": {},        # id(patcher) -> {kind, patcher, ts}             （观测到的任意模型）
-    "signals": [],        # (kind, state, ts) 闲置信号
     "events": [],         # 日志环形缓冲
 }
 
 _MAX_EVENTS = 40
-_MAX_SIGNALS = 60
-_MAX_WATCHED = 200
-_WATCHED_TTL = 3600.0
 
 KIND_LABELS = {"unet": "UNET", "clip": "CLIP", "vae": "视频VAE", "audio_vae": "音频VAE"}
 
@@ -157,11 +152,11 @@ def register(kind, name, obj, model_type="", folder="", tkey=""):
 
 
 def _attach_model_callbacks(patcher, kind):
-    """在模型 patcher 上挂载状态回调（幂等）：
-    - ON_LOAD ：模型被加载/使用 → 记录"曾被使用"并实时更新状态（绿）。
-    - ON_DETACH：模型被官方模型管理卸载（其它模型需要显存时）→ 低显存模式下
-      立即释放其 CPU 内存（DynamicVRAM 模型）+ 实时更新状态（红/蓝）。
-      该机制与 guard 节点摆放位置无关，保证"工作模型运行时其它模型被自动卸载"。
+    """在模型 patcher 上挂载位置检测回调（幂等，纯检测模型位置）：
+    - ON_LOAD ：模型被官方加载到显存 → 实时更新状态（绿=显存）。
+    - ON_DETACH：模型被官方模型管理卸载（其它模型需要显存时）→ 实时更新状态
+      （蓝=CPU内存；低显存模式下动态模型再释放 CPU 权重 → 红=已卸载）。
+      该机制与 guard 节点摆放位置无关，保证状态灯始终反映模型真实位置。
     """
     try:
         if getattr(patcher, "__zouyu_hooked", False):
@@ -174,71 +169,33 @@ def _attach_model_callbacks(patcher, kind):
 
 
 def _on_model_load(kind, patcher):
+    """模型被加载到显存：状态灯 → 绿（纯位置检测，与任何模式开关无关）。"""
     with _LOCK:
         e = _REGISTRY["models"].get(kind)
         if e is not None and e["patcher"] is patcher:
-            e["ever_loaded"] = True
             e["state"] = "gpu"
             e["ts"] = _now()
 
 
 def _on_model_detach(kind, patcher):
-    if not get_switch():
-        return
-    freed = 0
-    try:
-        if patcher.is_dynamic():
-            freed = int(patcher.partially_unload_ram(1e32) or 0)
-    except Exception:
-        freed = 0
+    """模型被官方模型管理卸载：状态灯更新为真实位置（纯检测，不依赖模式开关）。
+
+    低显存模式下额外释放动态模型的 CPU 权重（动态模型可释放，状态 → 红）；
+    CPU缓存模式下只更新位置（蓝=权重保留在内存），不主动干预。
+    """
     with _LOCK:
         e = _REGISTRY["models"].get(kind)
         if e is not None and e["patcher"] is patcher:
             e["state"] = residency(patcher)
             e["ts"] = _now()
+    freed = 0
+    try:
+        if get_switch() and patcher.is_dynamic():
+            freed = int(patcher.partially_unload_ram(1e32) or 0)
+    except Exception:
+        freed = 0
     if freed > 0:
         log_event("[{}] 空闲即卸载：已释放 CPU 内存".format(KIND_LABELS.get(kind, kind)))
-
-
-def watch(kind, patcher):
-    """节点2 观测模型（通用于任意工作流、任意模型类型）"""
-    with _LOCK:
-        prev = _REGISTRY["watched"].get(id(patcher))
-        ever_loaded = bool(prev and prev.get("ever_loaded"))
-        if residency(patcher) == "gpu":
-            ever_loaded = True
-        _REGISTRY["watched"][id(patcher)] = {
-            "kind": kind, "patcher": patcher, "ts": _now(), "ever_loaded": ever_loaded,
-        }
-        cutoff = _now() - _WATCHED_TTL
-        for k in [k for k, v in _REGISTRY["watched"].items() if v["ts"] < cutoff]:
-            _REGISTRY["watched"].pop(k, None)
-        if len(_REGISTRY["watched"]) > _MAX_WATCHED:
-            _REGISTRY["watched"] = dict(list(_REGISTRY["watched"].items())[-_MAX_WATCHED:])
-        if kind in _REGISTRY["models"] and _REGISTRY["models"][kind]["patcher"] is patcher:
-            _REGISTRY["models"][kind]["state"] = residency(patcher)
-            _REGISTRY["models"][kind]["ts"] = _now()
-        # 通用：按 patcher 匹配更新所有条目（通用加载器的槽位条目 kind 为 slot{i}）
-        for k, e in _REGISTRY["models"].items():
-            if k != kind and e.get("patcher") is patcher:
-                e["state"] = residency(patcher)
-                e["ts"] = _now()
-    _attach_model_callbacks(patcher, kind)
-    return ever_loaded
-
-
-def record_signal(kind, state):
-    with _LOCK:
-        _REGISTRY["signals"].append((kind, state, _now()))
-        del _REGISTRY["signals"][:-_MAX_SIGNALS]
-
-
-def consume_signals():
-    """节点1 消费自上次执行以来的闲置信号，返回 [(kind, state, ts), ...]"""
-    with _LOCK:
-        out = list(_REGISTRY["signals"])
-        _REGISTRY["signals"] = []
-    return out
 
 
 def fully_unload_patcher(patcher):
@@ -258,50 +215,6 @@ def fully_unload_patcher(patcher):
     except Exception:
         freed_ram = 0
     return freed_ram
-
-
-def evaluate_idle(kind, patcher, zh, has_trigger=False):
-    """节点2 的核心判定：模型此刻是否空闲 → 按开关决定动作。
-
-    返回 (说明文本, 动作后状态, action)，action ∈ {"none", "official", "unload"}。
-    判定条件：
-    - 开关关闭：只记录闲置信号，交给官方管理（卸载到 CPU，状态→蓝色）。
-    - 开关开启 + 有 trigger（阶段边界，本节点之后不再使用该模型）：
-      - 模型在显存（gpu）→ 彻底卸载（显存+CPU内存，状态→红色）；
-      - 模型在 CPU 缓存（cpu）→ 动态模型继续释放 CPU 内存；
-      - 完全卸载（free）/从未加载 → 无需处理。
-    - 开关开启 + 无 trigger（纯监测透传）：不动显存中的模型（可能即将被使用），
-      只对已在 CPU 缓存的动态模型释放内存、并记录状态。
-    """
-    switch = get_switch()
-    st = residency(patcher)
-    ever_loaded = watch(kind, patcher)
-    record_signal(kind, st)
-    label = KIND_LABELS.get(kind, kind)
-    if not switch:
-        return ("[{}] 空闲，开关关闭：交由官方管理自动卸载到CPU内存".format(label), st, "official")
-    if st == "gpu" and not has_trigger:
-        return ("[{}] 在显存中（可能即将被使用），未触发卸载，仅记录状态".format(label), st, "none")
-    if st == "gpu":
-        freed_ram = fully_unload_patcher(patcher)
-        st2 = residency(patcher)
-        if freed_ram > 0:
-            return ("[{}] 空闲 → 已彻底卸载（显存+CPU内存）".format(label), st2, "unload")
-        return ("[{}] 空闲 → 已卸载到CPU内存（传统模型不支持释放内存）".format(label), st2, "unload")
-    if st == "cpu":
-        freed_ram = 0
-        try:
-            if patcher.is_dynamic():
-                freed_ram = int(patcher.partially_unload_ram(1e32) or 0)
-        except Exception:
-            freed_ram = 0
-        st2 = residency(patcher)
-        if freed_ram > 0:
-            return ("[{}] 已在CPU缓存 → 已释放CPU内存".format(label), st2, "unload")
-        if ever_loaded:
-            return ("[{}] 已卸载到CPU（传统模型无法释放内存）".format(label), st2, "none")
-        return ("[{}] 尚未被调用（或已在CPU缓存），跳过".format(label), st2, "none")
-    return ("[{}] 已完全卸载，无需处理".format(label), st, "none")
 
 
 # ---------------------------------------------------------------------------
@@ -478,9 +391,7 @@ def _do_unload_model(e, name, label, zh):
     with _LOCK:
         cur = _REGISTRY["models"].get(kind)
         if cur is not None:
-            # 释放对象引用：DynamicVRAM 权重已释放；传统模型权重随对象回收。
-            # 同时移出 watched 观测表，避免其持有引用阻止 GC 回收权重。
-            _REGISTRY["watched"].pop(id(patcher), None)
+            # 释放对象引用：DynamicVRAM 权重已释放；传统模型权重随对象回收（GC）。
             cur["obj"] = None
             cur["patcher"] = None
             cur["state"] = "free"

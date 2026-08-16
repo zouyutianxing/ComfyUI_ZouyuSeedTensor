@@ -26,7 +26,6 @@ from .model_guard import (
     STATE_INFO,
     set_switch,
     register,
-    consume_signals,
     status_payload,
     log_event,
     _resolve_abs,
@@ -276,10 +275,6 @@ class ZouyuModelLoader(io.ComfyNode):
             register("slot{}".format(i), os.path.basename(name), obj,
                      model_type=actual_keys.get(i, TYPE_KEY.get(t, "other")),
                      folder=folder, tkey=TYPE_KEY.get(t, "other"))
-
-        # 消费节点2（模型加载开关）传来的闲置信号
-        for kind, st, _ts in consume_signals():
-            log_event("收到闲置信号: {} 状态={}".format(kind, st))
 
         payload = status_payload()
         lines = [
