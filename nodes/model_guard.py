@@ -319,6 +319,9 @@ def register_config(slots):
                 "folder": str(s.get("folder") or ""),
                 "name": name,
             }
+            # 配置变化 → 同槽位的旧登记失效（避免开关下拉显示旧的已加载模型，
+            # 而非加载器当前选择的模型）
+            _REGISTRY["models"].pop(kind, None)
 
 
 def configured_model_kinds():
@@ -378,14 +381,13 @@ def load_or_unload_model(kind, do_load, zh):
         return _do_load_config(kind, cfg, name, label, zh)
     # 卸载：卸载深度由加载器的低显存模式开关决定
     if e is None:
-        return ("{} 尚未加载（未运行加载器），无需卸载".format(label)
-                if zh else "{} not loaded yet (loader not run), nothing to unload".format(label))
+        return ("{} 尚未被加载器加载（未运行或加载失败），无法卸载".format(label)
+                if zh else "{} not loaded by loader (not run or failed), cannot unload".format(label))
     if get_switch():
         # 低显存模式：彻底卸载（显存 + CPU 内存）
         return _do_unload_model(e, name, label, zh)
-    # CPU缓存模式：不主动卸载，交官方模型管理（官方卸载到 CPU 内存）
-    return ("{} CPU缓存模式下不主动卸载，由官方模型管理负责（模型将卸载到 CPU 内存）".format(label)
-            if zh else "{} CPU-cache mode: no manual unload, handled by official model manager (RAM)".format(label))
+    # CPU缓存模式：按官方标准行为卸载到 CPU 内存（卸载仍生效，权重保留在 RAM）
+    return _do_unload_to_ram(e, name, label, zh)
 
 
 def _do_load_config(kind, cfg, name, label, zh):
@@ -430,6 +432,28 @@ def _do_load_model(e, name, label, zh):
     except Exception as exc:
         return ("重新加载 {} 失败：{}".format(name, str(exc)[:80])
                 if zh else "reload {} failed: {}".format(name, str(exc)[:80]))
+
+
+def _do_unload_to_ram(e, name, label, zh):
+    """按官方标准行为卸载到 CPU 内存：把模型从显存卸下（权重保留在 RAM），显示蓝色「未加载」。"""
+    kind = e["kind"]
+    patcher = e.get("patcher")
+    if patcher is None:
+        return ("{} 无可用模型对象".format(label) if zh else "{} no model object".format(label))
+    try:
+        model_management.unload_model_and_clones(patcher)
+        ok = True
+    except Exception:
+        ok = False
+    with _LOCK:
+        cur = _REGISTRY["models"].get(kind)
+        if cur is not None:
+            cur["state"] = residency(patcher)
+            cur["ts"] = _now()
+    if ok:
+        return ("已卸载 {} 至 CPU 内存（官方标准行为）".format(label)
+                if zh else "unloaded {} to RAM (official standard)".format(label))
+    return ("卸载 {} 失败".format(label) if zh else "unload {} failed".format(label))
 
 
 def _do_unload_model(e, name, label, zh):
@@ -518,6 +542,7 @@ def status_payload():
             "loader_ts": _REGISTRY["loader_ts"],
             "models_root": _models_root(),
             "models": models,
+            "configured_kinds": sorted(_REGISTRY["configured"].keys()),
             "events": list(_REGISTRY["events"][-15:]),
         }
 

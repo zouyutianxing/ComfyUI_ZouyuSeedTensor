@@ -201,8 +201,8 @@ class ZouyuModelLoader(io.ComfyNode):
             io.Boolean.Input("low_vram_mode", default=False, label_on="低显存", label_off="CPU缓存",
                              optional=True,
                              tooltip="卸载深度控制：低显存=收到模型加载开关的卸载信号时，把对应模型从显存+CPU内存彻底卸载至硬盘"
-                                     "（DynamicVRAM 模型释放内存，红『已卸载』）；CPU缓存=不主动控制卸载，完全交给官方模型管理"
-                                     "（官方把模型从显存卸载到 CPU 内存，蓝『未加载』，权重保留在内存）"),
+                                     "（DynamicVRAM 模型释放内存，红『已卸载』）；CPU缓存=按官方标准行为卸载到 CPU 内存"
+                                     "（蓝『未加载』，权重保留在内存）"),
             io.Combo.Input("language", options=["中文", "English"], default="中文", optional=True),
         ])
         outputs = [io.AnyType.Output("model_{}".format(i)) for i in range(MAX_MODELS)]

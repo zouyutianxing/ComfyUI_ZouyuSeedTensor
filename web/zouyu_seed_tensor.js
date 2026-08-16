@@ -1717,14 +1717,16 @@ function setupModelSwitchNode(node) {
   statusNodes.add(node);
   startStatusPolling();
 
-  // 框架 configure 会重建控件（重置下拉选项/回调），configure 后重新刷新下拉与副标题
+  // 框架 configure 会重建控件（重置下拉选项/回调），configure 后多次延迟重新刷新下拉与副标题
   const origConfigure = node.configure ? node.configure.bind(node) : null;
   if (origConfigure) {
     node.configure = function (info) {
       const r = origConfigure(info);
       try {
         applySwitchSubtitle(node);
-        refreshSwitchModelCombo(node);
+        setTimeout(() => refreshSwitchModelCombo(node), 80);
+        setTimeout(() => refreshSwitchModelCombo(node), 400);
+        setTimeout(() => refreshSwitchModelCombo(node), 1200);
       } catch (e) { /* ignore */ }
       return r;
     };
@@ -1767,21 +1769,28 @@ async function refreshSwitchModelCombo(node) {
   const w = node.widgets?.find((x) => x.name === "model");
   if (!w) return;
   try {
-    const r = await fetch("/zouyu_model_loader/status");
-    if (!r.ok) return;
-    const payload = await r.json();
-    // 只列出加载器中已配置/已选模型的槽位；显示名 = 模型文件名（与加载器下拉一致）
-    const items = (payload.models || [])
-      .filter((m) => String(m.kind || "").startsWith("slot"))
-      .map((m) => ({ value: m.kind, label: m.name || m.kind }));
-    w.options = w.options || {};
-    const values = ["(未选择)", ...items.map((i) => i.value)];
-    if (!w.options.values || w.options.values.join("|") !== values.join("|")) {
-      w.options.values = values;
+    // 直接从画布中的「模型加载器」节点实时读取配置（与加载器下拉完全一致），
+    // 不依赖后端 configured/registered（避免旧工作流/示例工作流的残留配置污染开关下拉）
+    const items = [];
+    const seen = new Set();
+    for (const n of app.graph?._nodes || []) {
+      if ((n.comfyClass || n.type) !== "ZouyuModelLoader") continue;
+      for (let i = 0; i < MAX_MODELS; i++) {
+        const t = slotTypeOf(n, i);
+        const nm = slotNameOf(n, i);
+        if (t === "未使用" || !nm) continue;
+        const kind = `slot${i}`;
+        if (seen.has(kind)) continue;
+        seen.add(kind);
+        items.push({ value: kind, label: nm });
+      }
     }
+    w.options = w.options || {};
+    w.options.values = ["(未选择)", ...items.map((i) => i.value)];
     w.options.getOptionLabel = (v) => {
       const it = items.find((i) => i.value === v);
-      return it ? it.label : v;
+      if (it) return it.label;
+      return v === "(未选择)" ? v : "";
     };
     app.graph?.setDirtyCanvas(true, true);
   } catch (e) {
