@@ -248,9 +248,12 @@ def register_config(slots):
                 "folder": str(s.get("folder") or ""),
                 "name": name,
             }
-            # 配置变化 → 同槽位的旧登记失效（避免开关下拉显示旧的已加载模型，
-            # 而非加载器当前选择的模型）
-            _REGISTRY["models"].pop(kind, None)
+            # 仅当配置的模型与已登记模型不同时才使旧登记失效。
+            # 前端每次 configure/reattach 都会重复推送相同配置，若无条件 pop，
+            # 已加载/已登记的模型会被清成「已卸载」（红灯），蓝/绿灯无法保持。
+            old = _REGISTRY["models"].get(kind)
+            if old is not None and old.get("name") != name:
+                _REGISTRY["models"].pop(kind, None)
 
 
 def configured_model_kinds():

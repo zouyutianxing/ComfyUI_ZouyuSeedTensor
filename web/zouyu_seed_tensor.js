@@ -858,7 +858,14 @@ function updateRowTail(node, overlay, i, rowCY, visible, zh) {
     ? (zh ? (info && info.zh) || "未知" : (info && info.en) || "Unknown")
     : (zh ? "未选择" : "Not chosen");
   tail.appendChild(textEl);
-  if (node.__zouyuStatus) node.__zouyuStatus[`slot${i}`] = { el: light, textEl, tag: null, dotOnly: true };
+  if (node.__zouyuStatus) {
+    // 重建元素后保留轮询写入的 state/color/zh/en（否则状态被清空，灯永远显示初始色）
+    const prev = node.__zouyuStatus[`slot${i}`] || {};
+    node.__zouyuStatus[`slot${i}`] = {
+      el: light, textEl, tag: null, dotOnly: true,
+      state: prev.state, color: prev.color, zh: prev.zh, en: prev.en,
+    };
+  }
 }
 
 /** Vue 模式：槽位行下的按钮行（📁 模型文件夹）。旧版 Canvas 模式用真实按钮控件。 */
