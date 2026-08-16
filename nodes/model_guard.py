@@ -134,8 +134,8 @@ def register(kind, name, obj, model_type="", folder="", tkey=""):
     """节点1 每次执行后登记模型（同 kind 旧条目被替换，旧 patcher 交由 GC 回收）。
 
     folder/tkey 记录模型来源，供"模型加载开关"节点按需重新加载。
-    状态由 status_payload 实时判定（执行中 + ComfyUI currently_used + 位置），
-    登记时仅按位置初始化，不预设「工作中」。
+    状态由 status_payload 实时判定：当前节点 load_models_gpu 调用的模型 = 工作中（绿），
+    其余按位置显示闲置（黄）/已卸载（红）。
     """
     with _LOCK:
         patcher = _patcher_of(obj)
@@ -152,27 +152,66 @@ def register(kind, name, obj, model_type="", folder="", tkey=""):
         }
         _REGISTRY["loader_ts"] = _now()
     _attach_model_callbacks(patcher, kind)
+    _hook_patches_models(patcher, kind)
 
 
 def set_exec_state(on):
-    """设置「工作流执行中」标志（前端 execution_start/结束 通知 + 后端 send_sync 兜底）。"""
+    """设置「工作流执行中」标志（前端 execution_start/结束 通知 + 后端 send_sync 兜底）。
+
+    on=False（执行结束）时同时清除所有「工作中」标记 → 全部按位置显示闲置/已卸载。
+    """
     with _LOCK:
         _REGISTRY["executing"] = bool(on)
+        if not on:
+            for e in _REGISTRY["models"].values():
+                if e.get("state") == "busy":
+                    p = e.get("patcher")
+                    e["state"] = residency(p) if p is not None else "free"
+                    e["ts"] = _now()
 
 
-def _is_model_used(patcher):
-    """ComfyUI 官方语义：模型是否正在被当前执行使用。
+def _mark_used(kind):
+    """标记某模型为「当前节点正在调用」（绿）。"""
+    with _LOCK:
+        e = _REGISTRY["models"].get(kind)
+        if e is not None and e.get("patcher") is not None:
+            e["state"] = "busy"
+            e["ts"] = _now()
 
-    `load_models_gpu` 使用模型时会把对应的 LoadedModel.currently_used 置 True，
-    卸载时（free_memory）置 False。无需 hook 全局函数，与其它插件零冲突。
+
+def clear_busy():
+    """节点执行完成（前端 executed 事件）：清除所有「工作中」标记 → 按位置显示闲置/已卸载。"""
+    with _LOCK:
+        for e in _REGISTRY["models"].values():
+            if e.get("state") == "busy":
+                p = e.get("patcher")
+                e["state"] = residency(p) if p is not None else "free"
+                e["ts"] = _now()
+
+
+def _hook_patches_models(patcher, kind):
+    """包装模型实例的 `model_patches_models`（幂等，纯检测，不改变功能）。
+
+    ComfyUI 的 `load_models_gpu` 对每个要使用的模型都会调用 `model_patches_models()`
+    （无论模型是否已在显存），因此这是「模型正被当前节点调用」的可靠信号——
+    比 ON_LOAD（仅首次加载触发）更准，且只 hook 单个模型实例，与其它插件零冲突。
     """
     try:
-        for lm in model_management.current_loaded_models:
-            if lm.model is patcher and lm.currently_used:
-                return True
+        if patcher is None or getattr(patcher, "__zouyu_pm_hooked", False):
+            return
+        patcher.__zouyu_pm_hooked = True
+        orig = patcher.model_patches_models
+
+        def wrapped(*args, **kwargs):
+            try:
+                _mark_used(kind)
+            except Exception:
+                pass
+            return orig(*args, **kwargs)
+
+        patcher.model_patches_models = wrapped
     except Exception:
         pass
-    return False
 
 
 def _attach_model_callbacks(patcher, kind):
@@ -192,11 +231,15 @@ def _attach_model_callbacks(patcher, kind):
 
 
 def _on_model_load(kind, patcher):
-    """模型被加载到显存：更新位置快照（是否「工作中」由 status_payload 结合执行状态实时判定）。"""
+    """模型被加载到显存（ON_LOAD 回调）。
+
+    ON_LOAD 发生在 load_models_gpu 加载模型时——执行中即「当前节点正在调用」（保持 busy/绿）；
+    非执行（手动加载）按位置显示（闲置/黄）。
+    """
     with _LOCK:
         e = _REGISTRY["models"].get(kind)
         if e is not None and e["patcher"] is patcher:
-            e["state"] = residency(patcher)
+            e["state"] = "busy" if _REGISTRY.get("executing") else residency(patcher)
             e["ts"] = _now()
 
 
@@ -248,8 +291,11 @@ def _on_model_detach(kind, patcher):
     with _LOCK:
         e = _REGISTRY["models"].get(kind)
         if e is not None and e["patcher"] is patcher:
-            # 位置在权重释放动作之后重新检测（低显存释放动态权重 → 真实位置变为 free/红）
-            e["state"] = residency(patcher)
+            # 执行中正在调用（busy）时不被 detach 覆盖（load_models_gpu 处理已加载模型时
+            # 会 detach 旧 clone 触发本回调，位置由 status_payload 结合 busy 实时判定）。
+            # 非 busy 或非执行 → 更新位置快照（黄/红）。
+            if e.get("state") != "busy" or not _REGISTRY.get("executing"):
+                e["state"] = residency(patcher)
             e["ts"] = _now()
     if freed > 0:
         log_event("[{}] 空闲即卸载：已释放 CPU 内存".format(KIND_LABELS.get(kind, kind)))
@@ -415,7 +461,7 @@ def _do_load_model(e, name, label, zh):
             with _LOCK:
                 cur = _REGISTRY["models"].get(kind)
                 if cur is not None:
-                    # 「工作中/闲置」由 status_payload 结合 currently_used 实时判定
+                    # 「工作中/闲置」由 status_payload 实时判定（model_patches_models hook 标记 busy）
                     cur["state"] = residency(patcher)
                     cur["ts"] = _now()
             return ("已加载 {} {}（{}）".format(label, name, "显存")
@@ -472,8 +518,8 @@ def status_payload():
     with _LOCK:
         models = []
         # 精确三色语义（完全实时判定）：
-        #   绿(gpu) = 工作流执行中 且 ComfyUI currently_used（模型正在被 load_models_gpu 使用）且实际在显存
-        #   黄(cpu) = 闲置：在显存或 CPU 内存中，但当前无执行使用
+        #   绿(gpu) = 工作流执行中 且当前节点 load_models_gpu 正在调用该模型（state=busy）且实际在显存
+        #   黄(cpu) = 闲置：在显存或 CPU 内存中，但当前节点未调用
         #   红(free) = 已卸载：权重已释放 / 不在显存也不在内存
         executing = bool(_REGISTRY.get("executing"))
         for kind, e in _REGISTRY["models"].items():
@@ -482,7 +528,7 @@ def status_payload():
                 st = "free"
             else:
                 pos = residency(patcher)
-                if executing and _is_model_used(patcher) and pos == "gpu":
+                if executing and e.get("state") == "busy" and pos == "gpu":
                     st = "gpu"                      # 工作中（绿）
                 else:
                     st = "cpu" if pos != "free" else "free"  # 闲置（黄）/ 已卸载（红）
@@ -997,12 +1043,20 @@ def register_routes():
     async def _set_exec_state(request):
         """前端通知：工作流执行开始/结束（execution_start / success / error / interrupted）。
 
-        设置「执行中」标志；「工作中（绿）」由 status_payload 结合 ComfyUI currently_used
-        实时判定，执行结束（on=false）后所有模型自动按位置显示「闲置（黄）/已卸载（红）」。"""
+        设置「执行中」标志；执行结束时清除所有「工作中」标记 → 按位置显示闲置/已卸载。"""
         try:
             data = await request.json()
             set_exec_state(bool(data.get("on", False)))
             return web.json_response({"ok": True, "executing": bool(_REGISTRY.get("executing"))})
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)[:200]}, status=400)
+
+    @routes.post("/zouyu_model_loader/clear_busy")
+    async def _clear_busy(request):
+        """前端通知：某节点执行完成 → 清除该节点用过的模型的「工作中」标记（转闲置/已卸载）。"""
+        try:
+            clear_busy()
+            return web.json_response({"ok": True})
         except Exception as exc:
             return web.json_response({"ok": False, "error": str(exc)[:200]}, status=400)
 

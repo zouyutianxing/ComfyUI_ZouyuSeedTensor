@@ -1958,6 +1958,9 @@ api.addEventListener("executed", (event) => {
   try {
     const detail = event.detail;
     if (!detail || detail.nodeId == null) return;
+    // 节点执行完成：清除该节点用过的模型的「工作中」标记（转闲置黄）——
+    // 配合 model_patches_models hook，实现「当前节点正在调用的模型绿、其余黄」
+    fetch("/zouyu_model_loader/clear_busy", { method: "POST" }).catch(() => {});
     const node = app.graph?._nodes?.find((n) => String(n.id) === String(detail.nodeId));
     if (!node) return;
     if (node.comfyClass === "ZouyuModelLoader") {
