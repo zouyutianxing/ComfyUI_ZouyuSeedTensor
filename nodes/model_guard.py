@@ -301,32 +301,32 @@ def _on_model_load(kind, patcher):
 def _install_busy_detection():
     """安装「工作流执行中」检测（不改变任何功能）。
 
-    hook `PromptServer.send_sync`：捕获 execution_start（执行开始）与
-    execution_success/error/interrupted（执行结束）→ 更新 executing 标志。
-    后端兜底，纯 API 提交（不经前端）也能正确复位。
+    参考 ComfyUI 0.33 执行事件广播点：PromptExecutor.add_message 是
+    execution_start / execution_success / execution_error / execution_interrupted
+    的唯一入口（execution.py:677，内部再 send_sync 广播给前端）。
 
-    「工作中」（绿）的精确判定完全依赖 ComfyUI 官方 `LoadedModel.currently_used`
-    （load_models_gpu 使用模型时置 True），无需 hook 全局 load_models_gpu，
-    与 ComfyUI-Dev-Utils 等插件零冲突。
+    类级 hook 它（而非覆盖 PromptServer.send_sync 实例属性——实例属性会被
+    ComfyUI-Dev-Utils 等其它插件覆盖，导致执行状态检测失效）。后端独立可靠，
+    纯 API 提交也能正确复位；前端事件（/set_exec_state）保留作双保险。
     """
     try:
-        from server import PromptServer
-        inst = PromptServer.instance
-        if inst is not None and not getattr(inst, "_zouyu_sync_hooked", False):
-            inst._zouyu_sync_hooked = True
-            orig = inst.send_sync
+        from execution import PromptExecutor
+        if getattr(PromptExecutor, "_zouyu_addmsg_hooked", False):
+            return
+        PromptExecutor._zouyu_addmsg_hooked = True
+        orig = PromptExecutor.add_message
 
-            def wrapped(event, data, sid=None):
-                try:
-                    if event == "execution_start":
-                        set_exec_state(True)
-                    elif event in ("execution_success", "execution_error", "execution_interrupted"):
-                        set_exec_state(False)
-                except Exception:
-                    pass
-                return orig(event, data, sid)
+        def wrapped(self, event, data, broadcast):
+            try:
+                if event == "execution_start":
+                    set_exec_state(True)
+                elif event in ("execution_success", "execution_error", "execution_interrupted"):
+                    set_exec_state(False)
+            except Exception:
+                pass
+            return orig(self, event, data, broadcast)
 
-            inst.send_sync = wrapped
+        PromptExecutor.add_message = wrapped
     except Exception:
         pass
 
@@ -652,6 +652,7 @@ def status_payload():
             "switch": _REGISTRY["switch"],
             "switch_ts": _REGISTRY["switch_ts"],
             "loader_ts": _REGISTRY["loader_ts"],
+            "executing": bool(_REGISTRY.get("executing")),
             "models_root": _models_root(),
             "models": models,
             "configured_kinds": sorted(_REGISTRY["configured"].keys()),
