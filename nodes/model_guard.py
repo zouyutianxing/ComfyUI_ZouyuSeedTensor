@@ -173,7 +173,7 @@ def _on_model_load(kind, patcher):
     with _LOCK:
         e = _REGISTRY["models"].get(kind)
         if e is not None and e["patcher"] is patcher:
-            e["state"] = "gpu"
+            e["state"] = residency(patcher)
             e["ts"] = _now()
 
 
@@ -183,17 +183,18 @@ def _on_model_detach(kind, patcher):
     低显存模式下额外释放动态模型的 CPU 权重（动态模型可释放，状态 → 红）；
     CPU缓存模式下只更新位置（蓝=权重保留在内存），不主动干预。
     """
-    with _LOCK:
-        e = _REGISTRY["models"].get(kind)
-        if e is not None and e["patcher"] is patcher:
-            e["state"] = residency(patcher)
-            e["ts"] = _now()
     freed = 0
     try:
         if get_switch() and patcher.is_dynamic():
             freed = int(patcher.partially_unload_ram(1e32) or 0)
     except Exception:
         freed = 0
+    with _LOCK:
+        e = _REGISTRY["models"].get(kind)
+        if e is not None and e["patcher"] is patcher:
+            # 位置在权重释放动作之后重新检测（低显存释放动态权重 → 真实位置变为 free/红）
+            e["state"] = residency(patcher)
+            e["ts"] = _now()
     if freed > 0:
         log_event("[{}] 空闲即卸载：已释放 CPU 内存".format(KIND_LABELS.get(kind, kind)))
 
