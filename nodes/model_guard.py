@@ -191,43 +191,18 @@ def mark_all_idle():
                 e["ts"] = _now()
 
 
-def _mark_busy(patcher):
-    """标记某个 patcher 对应的已登记模型为「工作中」（绿）。"""
-    with _LOCK:
-        for e in _REGISTRY["models"].values():
-            if e.get("patcher") is patcher:
-                e["state"] = "busy"
-                e["ts"] = _now()
-
-
 def _install_busy_detection():
-    """安装「模型是否正在工作」的准确检测（参考官方/社区做法，不改变任何功能）。
+    """安装「模型是否正在工作」的检测（不改变任何功能）。
 
-    - hook `model_management.load_models_gpu`：任何节点执行前都会用它把要用的模型载入显存
-      （已在显存的模型同样会经过它），此时标记为「工作中」（绿）——比 ON_LOAD 回调准确，
-      覆盖「模型已在显存缓存、再次被使用」的场景；
-    - hook `PromptServer.send_sync`：捕获 execution_success/error/interrupted（执行结束）
-      → 所有「工作中」转「闲置」（黄）。后端兜底，纯 API 提交（不经前端）也能正确复位。
-    两者均以「调用原函数」的方式包装，与其它插件 hook 兼容（链式调用）。
+    仅 hook `PromptServer.send_sync`：捕获 execution_success/error/interrupted（执行结束）
+    → 所有「工作中」模型转「闲置」（黄）。后端兜底，纯 API 提交（不经前端）也能正确复位。
+
+    说明：**不** hook `model_management.load_models_gpu`——该全局函数常被其它插件包装
+    （如 ComfyUI-Dev-Utils 的 dev_utils_send_sync），其包装函数不一定接收
+    memory_required 等关键字参数，串接会抛 TypeError 中断执行。
+    我们注册表里的模型都经由「模型加载器」登记（register 即标记「工作中」），
+    执行期间保持绿、执行结束转黄，已能准确反映状态，无需全局 hook。
     """
-    try:
-        mm = model_management
-        if not getattr(mm, "_zouyu_loaded_hooked", False):
-            mm._zouyu_loaded_hooked = True
-            orig = mm.load_models_gpu
-
-            def wrapped(models, *args, **kwargs):
-                try:
-                    for m in (models or []):
-                        _mark_busy(m)
-                except Exception:
-                    pass
-                return orig(models, *args, **kwargs)
-
-            mm.load_models_gpu = wrapped
-    except Exception:
-        pass
-
     try:
         from server import PromptServer
         inst = PromptServer.instance
@@ -359,8 +334,11 @@ def _slot_label(kind, zh, e=None, cfg=None):
     return kind
 
 
-def load_or_unload_model(kind, do_load, zh):
+def load_or_unload_model(kind, do_load, zh, in_execution=False):
     """模型加载开关：按信号执行 加载 / 卸载。
+
+    in_execution=True（开关节点在工作流执行中触发）：加载后标记「工作中」（绿）；
+    in_execution=False（手动 slot_action 触发）：加载后按位置显示「闲置」（黄）。
 
     卸载策略由「模型加载器」的低显存模式开关决定（加载器执行/前端切换时 set_switch 登记）：
     - 低显存模式开启（彻底卸载）：卸载信号 → 把模型从显存+CPU内存彻底卸载（红色「已卸载」）；
@@ -380,8 +358,8 @@ def load_or_unload_model(kind, do_load, zh):
     label = _slot_label(kind, zh, e=e, cfg=cfg)
     if do_load:
         if e is not None:
-            return _do_load_model(e, name, label, zh)
-        return _do_load_config(kind, cfg, name, label, zh)
+            return _do_load_model(e, name, label, zh, in_execution=in_execution)
+        return _do_load_config(kind, cfg, name, label, zh, in_execution=in_execution)
     # 卸载：CPU缓存模式（开关关闭）否决/屏蔽卸载信号——不主动干预模型，
     # 完全交由官方模型管理（官方在显存压力时自动卸载，权重保留在内存，黄色「未加载」）；
     # 低显存模式（开关开启）才执行彻底卸载（显存+CPU权重释放，红色「已卸载」）。
@@ -394,7 +372,7 @@ def load_or_unload_model(kind, do_load, zh):
     return _do_unload_model(e, name, label, zh)
 
 
-def _do_load_config(kind, cfg, name, label, zh):
+def _do_load_config(kind, cfg, name, label, zh, in_execution=False):
     """仅有配置未运行：直接从配置的文件加载并登记到注册表。"""
     try:
         from .model_loader import _load_slot_model
@@ -402,11 +380,17 @@ def _do_load_config(kind, cfg, name, label, zh):
         folder = cfg.get("folder", "")
         obj, actual, note = _load_slot_model(tkey, folder, cfg.get("name", ""))
         register(kind, cfg.get("name", ""), obj, model_type=actual, folder=folder, tkey=tkey)
-        # 加载后立即载入显存，状态灯变绿（否则显示「未加载」黄灯，加载看起来无效）
+        # 加载后立即载入显存；非工作流执行（手动）→ 转「闲置」（黄）
         try:
             patcher = _patcher_of(obj)
             if patcher is not None:
                 model_management.load_model_gpu(patcher)
+                if not in_execution:
+                    with _LOCK:
+                        cur = _REGISTRY["models"].get(kind)
+                        if cur is not None:
+                            cur["state"] = residency(patcher)
+                            cur["ts"] = _now()
         except Exception:
             pass
         return ("已加载 {} {}（{}）".format(label, name, note or "显存")
@@ -416,7 +400,7 @@ def _do_load_config(kind, cfg, name, label, zh):
                 if zh else "load {} failed: {}".format(name, str(exc)[:80]))
 
 
-def _do_load_model(e, name, label, zh):
+def _do_load_model(e, name, label, zh, in_execution=False):
     """加载：优先把现有 patcher 载入显存（保持下游对象一致）；失败则按登记文件重载。"""
     kind = e["kind"]
     patcher = e.get("patcher")
@@ -426,7 +410,8 @@ def _do_load_model(e, name, label, zh):
             with _LOCK:
                 cur = _REGISTRY["models"].get(kind)
                 if cur is not None:
-                    cur["state"] = residency(patcher)
+                    # 工作流执行中（开关信号）→ 标记「工作中」（绿）；手动 → 按位置（闲置/黄）
+                    cur["state"] = "busy" if in_execution else residency(patcher)
                     cur["ts"] = _now()
             return ("已加载 {} {}（{}）".format(label, name, "显存")
                     if zh else "loaded {} {} (VRAM)".format(label, name))
@@ -827,7 +812,8 @@ def list_model_dirs(rel=""):
 def slot_action(kind, action):
     """手动控制槽位模型：action ∈ {"load", "unload"}，返回说明文字（卸载深度由加载器低显存模式决定）。"""
     do_load = action == "load"
-    msg = load_or_unload_model(kind, do_load, True)
+    # 手动触发（非工作流执行）：加载后按位置显示「闲置」（黄）
+    msg = load_or_unload_model(kind, do_load, True, in_execution=False)
     log_event(msg)
     return msg
 
@@ -899,7 +885,7 @@ def reveal_path(path):
 
 
 def register_routes():
-    # 安装「模型是否正在工作」检测（hook load_models_gpu / send_sync，链式兼容其它插件）
+    # 安装「模型是否正在工作」检测（仅 hook send_sync 捕获执行结束，链式兼容其它插件）
     _install_busy_detection()
 
     try:
@@ -1068,7 +1054,8 @@ class ZouyuModelSwitch(io.ComfyNode):
                 log_event(msg)
                 text = msg
             else:
-                msg = load_or_unload_model(model, bool(action), zh)
+                # 开关节点在工作流执行中触发 → 加载后标记「工作中」（绿）
+                msg = load_or_unload_model(model, bool(action), zh, in_execution=True)
                 log_event(msg)
                 text = msg
         else:

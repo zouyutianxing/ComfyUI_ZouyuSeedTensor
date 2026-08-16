@@ -561,9 +561,10 @@ async function refreshStatusDOM(node) {
 
 function startStatusPolling() {
   if (statusTimer) return;
+  // 1s 轮询：提高「工作中/闲置/已卸载」状态变化的实时性
   statusTimer = setInterval(async () => {
     for (const node of [...statusNodes]) await refreshStatusDOM(node);
-  }, 2500);
+  }, 1000);
 }
 
 // ===========================================================================
@@ -1964,6 +1965,11 @@ api.addEventListener("executed", (event) => {
     } else if (node.comfyClass === "ZouyuModelSwitch") {
       refreshSwitchModelCombo(node);
       // 开关已发出加载/卸载信号（按低显存模式决定深度）→ 立即刷新所有加载器的状态灯
+      for (const ln of [...statusNodes]) {
+        if (ln.comfyClass === "ZouyuModelLoader") refreshStatusDOM(ln);
+      }
+    } else {
+      // 其它任意节点执行完成（可能使用了加载器输出的模型）→ 立即刷新所有加载器状态灯
       for (const ln of [...statusNodes]) {
         if (ln.comfyClass === "ZouyuModelLoader") refreshStatusDOM(ln);
       }
