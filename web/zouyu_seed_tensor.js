@@ -544,6 +544,8 @@ function stateText(state, lang) {
 
 let statusNodes = new Set();
 let statusTimer = null;
+// 后端卸载策略缓存（false=CPU缓存：开关退化为转接点；true=低显存：开关正常执行加载/卸载）
+let lastSwitch = false;
 
 async function refreshStatusDOM(node) {
   if (!node || !node.__zouyuStatus) return;
@@ -551,6 +553,7 @@ async function refreshStatusDOM(node) {
     const r = await fetch("/zouyu_model_loader/status");
     if (!r.ok) return;
     const payload = await r.json();
+    lastSwitch = !!payload.switch;
     const byKind = {};
     for (const m of payload.models || []) byKind[m.kind] = m;
     const lang = node.__zouyuLang || getLang();
@@ -570,7 +573,8 @@ async function refreshStatusDOM(node) {
       }
     }
     if (node.comfyClass === "ZouyuModelSwitch") {
-      // 开关节点的标题副文案由 action 决定，无需在此刷新；模型下拉由 loaders 执行事件刷新
+      // 低显存/CPU缓存策略变化会影响开关是否执行任务（CPU缓存=转接点）→ 刷新副标题
+      applySwitchSubtitle(node);
     }
     if (node.comfyClass === "ZouyuModelLoader") {
       // 执行后：按后端识别类型刷新端口名（类型 + 序号 + 分类，如 主模型0 (Diffusion)）
@@ -1653,12 +1657,13 @@ function setupModelLoaderNode(node) {
     applySlotVisibility(node);
     pushLoaderConfig(node);
     refreshAllSwitchCombos();
-    // 同步「低显存/CPU缓存」模式到后端（configure 恢复开关值后，开关卸载信号立即使用最新模式）
+    // 同步「低显存/CPU缓存」模式到后端（configure 恢复开关值后，开关卸载信号立即使用最新模式）。
+    // eager=false：配置恢复只登记策略值，不自动卸载任何模型（避免旧工作流低显存=true 恢复时模型被静默卸载）
     const lowVal = !!node.widgets?.find((w) => w.name === "low_vram_mode")?.value;
     fetch("/zouyu_model_loader/set_switch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ on: lowVal }),
+      body: JSON.stringify({ on: lowVal, eager: false }),
     }).catch(() => { /* 服务端未就绪时忽略 */ });
   }
   node.__zouyuReattach = reattach;
@@ -1674,13 +1679,19 @@ function setupModelLoaderNode(node) {
     lowW.callback = (v) => {
       if (orig) orig.call(lowW, v);
       // 切换「低显存/CPU缓存」立即同步后端 switch，开关卸载信号即时使用最新模式；
-      // 切到低显存时后端会立即释放已登记的非显存模型（灯变红），这里马上拉取最新状态
+      // eager=true：切到低显存时后端立即释放已登记的非显存模型（灯变红），这里马上拉取最新状态
       fetch("/zouyu_model_loader/set_switch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ on: !!v }),
+        body: JSON.stringify({ on: !!v, eager: true }),
       })
-        .then(() => refreshStatusDOM(node))
+        .then(async () => {
+          await refreshStatusDOM(node);
+          // 刷新所有开关节点的副标题（CPU缓存=转接点 / 低显存=加载·卸载）
+          for (const n of app.graph?._nodes || []) {
+            if ((n.comfyClass || n.type) === "ZouyuModelSwitch") applySwitchSubtitle(n);
+          }
+        })
         .catch(() => { /* 服务端未就绪时忽略 */ });
     };
   }
@@ -1807,7 +1818,12 @@ function applySwitchSubtitle(node) {
   const aw = node.widgets?.find((w) => w.name === "action");
   const on = !!(aw && aw.value);
   const base = zh ? "模型加载开关" : "Model Load Switch";
-  node.title = base + (on ? (zh ? " · 加载" : " · Load") : (zh ? " · 卸载" : " · Unload"));
+  if (!lastSwitch) {
+    // CPU缓存模式：开关退化为转接点，信号完全否决，仅透传
+    node.title = base + (zh ? " · 转接（CPU缓存）" : " · Passthrough (CPU-cache)");
+  } else {
+    node.title = base + (on ? (zh ? " · 加载" : " · Load") : (zh ? " · 卸载" : " · Unload"));
+  }
   app.graph?.setDirtyCanvas(true, true);
 }
 

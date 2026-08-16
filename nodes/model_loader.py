@@ -200,9 +200,9 @@ class ZouyuModelLoader(io.ComfyNode):
                                      "手动加载/卸载按钮与底部拖入导入条"),
             io.Boolean.Input("low_vram_mode", default=False, label_on="低显存", label_off="CPU缓存",
                              optional=True,
-                             tooltip="卸载深度控制：低显存=收到模型加载开关的卸载信号时，把对应模型从显存+CPU内存彻底卸载至硬盘"
-                                     "（DynamicVRAM 模型释放内存，红『已卸载』）；CPU缓存=按官方标准行为卸载到 CPU 内存"
-                                     "（蓝『未加载』，权重保留在内存）"),
+                             tooltip="卸载策略：低显存=收到模型加载开关的卸载信号时，把对应模型从显存+CPU内存彻底卸载"
+                                     "（DynamicVRAM 模型释放内存，红『已卸载』）；CPU缓存（默认）=否决/屏蔽开关节点的卸载信号，"
+                                     "不主动干预模型，完全交由官方模型管理（显存压力时官方自动卸载，蓝『未加载』）"),
             io.Combo.Input("language", options=["中文", "English"], default="中文", optional=True),
         ])
         outputs = [io.AnyType.Output("model_{}".format(i)) for i in range(MAX_MODELS)]
@@ -283,9 +283,9 @@ class ZouyuModelLoader(io.ComfyNode):
 
         payload = status_payload()
         lines = [
-            ("低显存模式: " + ("开启（彻底卸载闲置模型）" if switch else "关闭（官方管理→CPU缓存）"))
+            ("低显存模式: " + ("开启（卸载信号→彻底卸载模型）" if switch else "关闭（CPU缓存：否决卸载信号，官方管理）"))
             if zh else
-            ("Low VRAM: " + ("ON (fully unload idle)" if switch else "OFF (official → CPU cache)"))
+            ("Low VRAM: " + ("ON (unload signal → thorough unload)" if switch else "OFF (CPU-cache: unload vetoed, official)"))
         ]
         lines.extend(notes)
         for m in payload["models"]:

@@ -374,11 +374,10 @@ def _slot_label(kind, zh, e=None, cfg=None):
 def load_or_unload_model(kind, do_load, zh):
     """模型加载开关：按信号执行 加载 / 卸载。
 
-    卸载深度由「模型加载器」的低显存模式开关决定（加载器执行时 set_switch 登记）：
-    - 低显存模式开启（彻底卸载）：卸载信号 → 把模型从显存+CPU内存彻底卸载（DynamicVRAM 模型
-      可释放内存，红色「已卸载」）；
-    - 低显存模式关闭（CPU缓存）：不主动卸载，交给官方模型管理负责（官方把模型从显存卸载到
-      CPU 内存，蓝色「未加载」，权重保留在内存）。
+    卸载策略由「模型加载器」的低显存模式开关决定（加载器执行/前端切换时 set_switch 登记）：
+    - 低显存模式开启（彻底卸载）：卸载信号 → 把模型从显存+CPU内存彻底卸载（红色「已卸载」）；
+    - 低显存模式关闭（CPU缓存）：否决/屏蔽卸载信号，不主动干预模型，完全交由官方模型管理
+      （官方在显存压力时自动卸载，权重保留在内存，蓝色「未加载」）。
     优先操作已登记（执行过加载器）的模型对象；只有配置未运行时：
     - 加载 → 直接从配置的文件加载并登记；
     - 卸载 → 提示尚未加载。
@@ -395,15 +394,16 @@ def load_or_unload_model(kind, do_load, zh):
         if e is not None:
             return _do_load_model(e, name, label, zh)
         return _do_load_config(kind, cfg, name, label, zh)
-    # 卸载：卸载深度由加载器的低显存模式开关决定
+    # 卸载：CPU缓存模式（开关关闭）否决/屏蔽卸载信号——不主动干预模型，
+    # 完全交由官方模型管理（官方在显存压力时自动卸载，权重保留在内存，蓝色「未加载」）；
+    # 低显存模式（开关开启）才执行彻底卸载（显存+CPU权重释放，红色「已卸载」）。
     if e is None:
         return ("{} 尚未被加载器加载（未运行或加载失败），无法卸载".format(label)
                 if zh else "{} not loaded by loader (not run or failed), cannot unload".format(label))
-    if get_switch():
-        # 低显存模式：彻底卸载（显存 + CPU 内存）
-        return _do_unload_model(e, name, label, zh)
-    # CPU缓存模式：按官方标准行为卸载到 CPU 内存（卸载仍生效，权重保留在 RAM）
-    return _do_unload_to_ram(e, name, label, zh)
+    if not get_switch():
+        return ("{} CPU缓存模式：已屏蔽卸载信号，模型交由官方模型管理".format(label)
+                if zh else "{} CPU-cache mode: unload signal vetoed, model managed by ComfyUI".format(label))
+    return _do_unload_model(e, name, label, zh)
 
 
 def _do_load_config(kind, cfg, name, label, zh):
@@ -460,28 +460,6 @@ def _do_load_model(e, name, label, zh):
     except Exception as exc:
         return ("重新加载 {} 失败：{}".format(name, str(exc)[:80])
                 if zh else "reload {} failed: {}".format(name, str(exc)[:80]))
-
-
-def _do_unload_to_ram(e, name, label, zh):
-    """按官方标准行为卸载到 CPU 内存：把模型从显存卸下（权重保留在 RAM），显示蓝色「未加载」。"""
-    kind = e["kind"]
-    patcher = e.get("patcher")
-    if patcher is None:
-        return ("{} 无可用模型对象".format(label) if zh else "{} no model object".format(label))
-    try:
-        model_management.unload_model_and_clones(patcher)
-        ok = True
-    except Exception:
-        ok = False
-    with _LOCK:
-        cur = _REGISTRY["models"].get(kind)
-        if cur is not None:
-            cur["state"] = residency(patcher)
-            cur["ts"] = _now()
-    if ok:
-        return ("已卸载 {} 至 CPU 内存（官方标准行为）".format(label)
-                if zh else "unloaded {} to RAM (official standard)".format(label))
-    return ("卸载 {} 失败".format(label) if zh else "unload {} failed".format(label))
 
 
 def _do_unload_model(e, name, label, zh):
@@ -1009,13 +987,16 @@ def register_routes():
 
     @routes.post("/zouyu_model_loader/set_switch")
     async def _set_switch(request):
-        """前端切换加载器的「低显存/CPU缓存」开关时同步后端 switch，
-        使开关节点卸载信号立即使用最新模式（不必等加载器重新执行）。
-        切到低显存时立即释放已登记的非显存模型（灯变红），让开关效果即时可见。"""
+        """前端同步加载器的「低显存/CPU缓存」开关到后端。
+
+        eager=true（用户手动切换开关）：切到低显存时立即释放已登记的非显存模型
+        （灯变红），让开关效果即时可见；eager=false（工作流配置恢复 reattach）：
+        只同步策略值，不自动卸载任何模型（避免旧工作流低显存=true 恢复时模型被静默卸载）。"""
         try:
             data = await request.json()
             on = bool(data.get("on", False))
-            set_switch(on, eager=True)
+            eager = bool(data.get("eager", False))
+            set_switch(on, eager=eager)
             return web.json_response({"ok": True, "switch": get_switch()})
         except Exception as exc:
             return web.json_response({"ok": False, "error": str(exc)[:200]}, status=400)
@@ -1038,18 +1019,20 @@ class ZouyuModelSwitch(io.ComfyNode):
             description=(
                 "导线式信号检测：左右各一个端口（* 任意类型），可插入任何插件之间的连线，"
                 "信号直接透传。当检测到信号（数据）经过本节点时，按『动作』开关执行任务——"
-                "打开（加载）：把下拉所选模型加载进显存/CPU内存；关闭（卸载）：向模型加载器发送卸载信号，"
-                "由加载器的『低显存模式』开关决定卸载深度——低显存（彻底卸载）：把模型从显存与CPU内存彻底卸载；"
-                "CPU缓存：不主动卸载，交官方模型管理（卸载到 CPU 内存）。"
+                "打开（加载）：把下拉所选模型加载进显存/CPU内存；关闭（卸载）：向模型加载器发送卸载信号。"
+                "行为由加载器的『低显存模式』开关决定——低显存：开关正常执行加载/卸载"
+                "（卸载=把模型从显存与CPU内存彻底卸载）；CPU缓存（默认）：开关退化为『转接点』，"
+                "完全否决加载/卸载信号，只透传信号、不干预模型，模型完全交由官方模型管理。"
                 "模型下拉自动识别模型加载器在界面上已配置的模型（无需先运行加载器）。"
-                "副标题实时显示当前动作（加载/卸载）。"
+                "副标题实时显示当前动作（加载/卸载/转接）。"
             ),
             inputs=[
                 io.AnyType.Input("signal", optional=True, tooltip="信号输入（任意类型，直接透传；有数据经过时触发任务）"),
                 io.Combo.Input("model", options=configured_model_options(), default="(未选择)",
                                tooltip="选择要控制的模型（自动列出模型加载器已配置的槽位）"),
                 io.Boolean.Input("action", default=True, label_on="加载", label_off="卸载",
-                                 tooltip="加载=信号经过时把模型加载进显存；卸载=信号经过时向加载器发送卸载信号（深度由加载器低显存模式决定）"),
+                                 tooltip="加载=信号经过时把模型加载进显存；卸载=信号经过时向加载器发送卸载信号。"
+                                         "低显存模式：正常执行；CPU缓存模式：信号被完全否决（开关退化为转接点，只透传不干预）"),
                 io.Combo.Input("language", options=["中文", "English"], default="中文"),
             ],
             outputs=[
@@ -1065,9 +1048,18 @@ class ZouyuModelSwitch(io.ComfyNode):
             text = ("无信号经过：仅透传" if zh else "no signal: pass-through only")
             return io.NodeOutput(signal, ui={"text": [text]})
         if model and model != "(未选择)":
-            msg = load_or_unload_model(model, bool(action), zh)
-            log_event(msg)
-            text = msg
+            if not get_switch():
+                # CPU缓存模式（开关关闭）：开关退化为「转接点」——完全否决加载/卸载信号，
+                # 只透传信号，不干预模型（模型完全交由官方模型管理）
+                label = _slot_label(model, zh)
+                msg = ("{} CPU缓存模式：开关已禁用（转接点），仅透传信号，不干预模型".format(label)
+                       if zh else "{} CPU-cache mode: switch disabled (passthrough), signal only, no model action".format(label))
+                log_event(msg)
+                text = msg
+            else:
+                msg = load_or_unload_model(model, bool(action), zh)
+                log_event(msg)
+                text = msg
         else:
             text = ("未选择要控制的模型" if zh else "no model selected")
         return io.NodeOutput(signal, ui={"text": [text]})
