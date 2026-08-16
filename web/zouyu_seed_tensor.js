@@ -858,10 +858,8 @@ function updateRowTail(node, overlay, i, rowCY, visible, zh) {
 
 /** Vue 模式：槽位行下的按钮行（📁 模型文件夹）。旧版 Canvas 模式用真实按钮控件。 */
 function updateRowButtons(node, overlay, i, rowCY, visible, zh) {
-  const filled = slotFilled(node, i);
-  // 至少选过一个模型、且精简显示开关打开时，所有可见下拉都显示按钮（与 applySlotVisibility 一致）
-  const anyFilled = anySlotFilled(node);
-  const showBtn = visible && (filled || anyFilled) && compactViewOn(node);
+  // 完整模式下所有可见下拉都显示文件夹按钮（无需先选模型）；简洁模式隐藏
+  const showBtn = visible && compactViewOn(node);
   let bar = overlay.querySelector(`[data-zouyu-btns="${i}"]`);
   if (!showBtn) {
     if (bar) bar.remove();
@@ -1318,13 +1316,11 @@ function setupLegacyLoaderLayout(node) {
 function applySlotVisibility(node) {
   normalizeTypeWidgets(node);
   const count = visibleSlotCount(node);
-  const anyFilled = anySlotFilled(node);
   // 精简显示开关：关闭（简洁）= 隐藏文件夹按钮与导入条，只保留下拉/灯/提示/端口/低显存/语言/本开关
   const showActions = compactViewOn(node);
   for (let i = 0; i < MAX_MODELS; i++) {
     const w = slotWidgets(node, i);
     const visible = i < count;
-    const filled = slotFilled(node, i);
     // 「未使用」槽位显示为下一个空位时：清空残留 name（旧工作流自动填充的模型名）
     if (slotTypeOf(node, i) === "未使用" && w.name && w.name.value !== "(未选择)" && w.name.value !== "(无文件)") {
       w.name.value = "(未选择)";
@@ -1333,8 +1329,8 @@ function applySlotVisibility(node) {
     setWidgetHidden(w.type, true);
     setWidgetHidden(w.folder, true);
     setWidgetHidden(w.name, !visible);
-    // 行下文件夹按钮：至少选过一个模型、且精简显示开关打开时显示
-    const showBtn = visible && (filled || anyFilled) && showActions;
+    // 行下文件夹按钮：完整模式下所有可见下拉都显示（无需先选模型）；简洁模式隐藏
+    const showBtn = visible && showActions;
     const folderBtn = node.widgets?.find((x) => x.__zouyuSlotBtn === `folder_${i}`);
     if (folderBtn) setWidgetHidden(folderBtn, !showBtn);
   }
