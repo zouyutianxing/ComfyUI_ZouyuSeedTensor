@@ -768,14 +768,15 @@ async function refreshSlotFileOptions(node, i) {
     // 选项始终包含「(未选择)」占位符与当前已选值，避免下拉值不在选项中
     // 而被框架重置或前端校验报「输入值不可用」
     w.options.values = ["(未选择)", ...files];
-    const cur = slotNameOf(node, i);
-    if (cur && !files.includes(cur)) {
+    const cur = w.value;
+    if (cur && cur !== "(未选择)" && cur !== "(无文件)" && !files.includes(cur)) {
       w.options.values.push(cur);
     }
-    // 未选择（占位符）保持不动，避免把下拉自动填成第一个文件；
-    // 只有当前值已失效时才回退到第一个可用文件
-    if (w.value !== "(未选择)" && w.value !== "(无文件)" && !files.includes(w.value)) {
-      w.value = files[0] || "(未选择)";
+    // 空值（初始化/旧工作流残留）归一化为「(未选择)」占位符。
+    // 绝不改写用户已选的模型：异步响应回来时可能已晚于用户操作，
+    // 用 files[0] 回退会把用户刚选中的模型悄悄替换掉（切换工作流后配置丢失的根因）。
+    if (w.value == null || w.value === "") {
+      w.value = "(未选择)";
     }
   } catch (e) {
     w.options.values = ["(未选择)"];
@@ -1562,8 +1563,41 @@ function setupModelLoaderNode(node) {
   const origConfigure = node.configure ? node.configure.bind(node) : null;
   if (origConfigure) {
     node.configure = function (info) {
+      // 兼容旧工作流：早期版本把按钮（serialize=false）的 null 值也写进了 widgets_values，
+      // 恢复时框架按顺序赋值会因按钮占位而错位（类型/文件夹/模型名错乱，表现为「配置丢失」）。
+      // 这里按当前 widget 数组剔除按钮占位值，使 widgets_values 重新与 schema 输入对齐。
+      if (info && Array.isArray(info.widgets_values) && this.widgets) {
+        const wv = info.widgets_values;
+        const schemaCount = Object.values(node.constructor.nodeData?.inputs || {}).filter((inp) =>
+          this.widgets.some((w) => w.name === inp.name)
+        ).length;
+        if (schemaCount > 0 && wv.length > schemaCount) {
+          const cleaned = [];
+          for (let wi = 0; wi < this.widgets.length && wi < wv.length; wi++) {
+            const w = this.widgets[wi];
+            if (w.type === "button" || w.serialize === false) continue;
+            cleaned.push(wv[wi]);
+          }
+          if (cleaned.length === schemaCount) info.widgets_values = cleaned;
+        }
+      }
       const r = origConfigure(info);
       try { node.__zouyuReattach && node.__zouyuReattach(); } catch (e) { /* ignore */ }
+      return r;
+    };
+  }
+
+  // 序列化时剔除按钮占位值（框架 serialize=false 对 button 不生效），
+  // 保证 widgets_values 与 schema 输入一一对应，保存/恢复不再错位。
+  const origSerialize = node.serialize ? node.serialize.bind(node) : null;
+  if (origSerialize) {
+    node.serialize = function () {
+      const r = origSerialize();
+      if (r && Array.isArray(r.widgets_values)) {
+        r.widgets_values = (this.widgets || [])
+          .filter((w) => w.serialize !== false && w.type !== "button")
+          .map((w) => w.value);
+      }
       return r;
     };
   }
