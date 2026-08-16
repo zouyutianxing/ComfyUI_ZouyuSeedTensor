@@ -191,6 +191,63 @@ def mark_all_idle():
                 e["ts"] = _now()
 
 
+def _mark_busy(patcher):
+    """标记某个 patcher 对应的已登记模型为「工作中」（绿）。"""
+    with _LOCK:
+        for e in _REGISTRY["models"].values():
+            if e.get("patcher") is patcher:
+                e["state"] = "busy"
+                e["ts"] = _now()
+
+
+def _install_busy_detection():
+    """安装「模型是否正在工作」的准确检测（参考官方/社区做法，不改变任何功能）。
+
+    - hook `model_management.load_models_gpu`：任何节点执行前都会用它把要用的模型载入显存
+      （已在显存的模型同样会经过它），此时标记为「工作中」（绿）——比 ON_LOAD 回调准确，
+      覆盖「模型已在显存缓存、再次被使用」的场景；
+    - hook `PromptServer.send_sync`：捕获 execution_success/error/interrupted（执行结束）
+      → 所有「工作中」转「闲置」（黄）。后端兜底，纯 API 提交（不经前端）也能正确复位。
+    两者均以「调用原函数」的方式包装，与其它插件 hook 兼容（链式调用）。
+    """
+    try:
+        mm = model_management
+        if not getattr(mm, "_zouyu_loaded_hooked", False):
+            mm._zouyu_loaded_hooked = True
+            orig = mm.load_models_gpu
+
+            def wrapped(models, *args, **kwargs):
+                try:
+                    for m in (models or []):
+                        _mark_busy(m)
+                except Exception:
+                    pass
+                return orig(models, *args, **kwargs)
+
+            mm.load_models_gpu = wrapped
+    except Exception:
+        pass
+
+    try:
+        from server import PromptServer
+        inst = PromptServer.instance
+        if inst is not None and not getattr(inst, "_zouyu_sync_hooked", False):
+            inst._zouyu_sync_hooked = True
+            orig = inst.send_sync
+
+            def wrapped(event, data, sid=None):
+                try:
+                    if event in ("execution_success", "execution_error", "execution_interrupted"):
+                        mark_all_idle()
+                except Exception:
+                    pass
+                return orig(event, data, sid)
+
+            inst.send_sync = wrapped
+    except Exception:
+        pass
+
+
 def _on_model_detach(kind, patcher):
     """模型被官方模型管理卸载：状态灯更新为真实位置（纯检测，不依赖模式开关）。
 
@@ -842,6 +899,9 @@ def reveal_path(path):
 
 
 def register_routes():
+    # 安装「模型是否正在工作」检测（hook load_models_gpu / send_sync，链式兼容其它插件）
+    _install_busy_detection()
+
     try:
         from aiohttp import web
         from server import PromptServer
