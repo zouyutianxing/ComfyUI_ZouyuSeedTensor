@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# 临时文件（含大模型缓存，禁止提交）
+temp/
+*.pt
+*.safetensors
+*.bin
+*.pth
