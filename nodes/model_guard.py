@@ -49,11 +49,11 @@ SLOT_TYPE_LABELS = {
     "unknown":   {"zh": "未知",    "en": "Unknown"},
 }
 
-# 三色状态灯：绿=已加载(显存) / 黄=未加载(CPU内存，未被显存加载) / 红=已卸载(硬盘)
+# 三色状态灯：绿=工作中(显存且执行中) / 黄=闲置(显存或CPU内存，无执行使用) / 红=已卸载(硬盘，权重已释放)
 # 主文字保持简短（避免与下拉内文件名文字重叠），位置提示由前端灯 tooltip 展示
 STATE_INFO = {
-    "gpu":     {"zh": "已加载", "en": "Loaded",       "color": "#4caf50"},
-    "cpu":     {"zh": "未加载", "en": "Not loaded",   "color": "#ffeb3b"},
+    "gpu":     {"zh": "工作中", "en": "In use",       "color": "#4caf50"},
+    "cpu":     {"zh": "闲置",   "en": "Idle",         "color": "#ffeb3b"},
     "free":    {"zh": "已卸载", "en": "Unloaded",     "color": "#f44336"},
     "unknown": {"zh": "未知",   "en": "Unknown",      "color": "#9e9e9e"},
 }
@@ -136,6 +136,8 @@ def register(kind, name, obj, model_type="", folder="", tkey=""):
     """
     with _LOCK:
         patcher = _patcher_of(obj)
+        # 加载器执行 = 模型参与当前工作流执行 → 标记「工作中」（绿）；
+        # 前端在执行结束时通知 mark_all_idle()，转为「闲置」（黄）
         _REGISTRY["models"][kind] = {
             "kind": kind,
             "name": name,
@@ -144,7 +146,7 @@ def register(kind, name, obj, model_type="", folder="", tkey=""):
             "model_type": model_type,
             "folder": folder,
             "tkey": tkey,
-            "state": residency(patcher),
+            "state": "busy" if patcher is not None else "free",
             "ts": _now(),
         }
         _REGISTRY["loader_ts"] = _now()
@@ -153,9 +155,8 @@ def register(kind, name, obj, model_type="", folder="", tkey=""):
 
 def _attach_model_callbacks(patcher, kind):
     """在模型 patcher 上挂载位置检测回调（幂等，纯检测模型位置）：
-    - ON_LOAD ：模型被官方加载到显存 → 实时更新状态（绿=显存）。
-    - ON_DETACH：模型被官方模型管理卸载（其它模型需要显存时）→ 实时更新状态
-      （黄=CPU内存；低显存模式下动态模型再释放 CPU 权重 → 红=已卸载）。
+    - ON_LOAD ：模型被官方加载到显存 → 标记「工作中」（绿）。
+    - ON_DETACH：模型被官方模型管理卸载（其它模型需要显存时）→ 更新为「闲置/已卸载」。
       该机制与 guard 节点摆放位置无关，保证状态灯始终反映模型真实位置。
     """
     try:
@@ -169,12 +170,25 @@ def _attach_model_callbacks(patcher, kind):
 
 
 def _on_model_load(kind, patcher):
-    """模型被加载到显存：状态灯 → 绿（纯位置检测，与任何模式开关无关）。"""
+    """模型被加载到显存（即将被使用）：标记「工作中」（绿）。"""
     with _LOCK:
         e = _REGISTRY["models"].get(kind)
         if e is not None and e["patcher"] is patcher:
-            e["state"] = residency(patcher)
+            e["state"] = "busy"
             e["ts"] = _now()
+
+
+def mark_all_idle():
+    """工作流执行结束：所有「工作中」模型转为「闲置」（黄）。
+
+    位置判定：对象仍在（显存或内存）→ 闲置（黄）；对象已释放（patcher=None）→ 已卸载（红）。
+    """
+    with _LOCK:
+        for e in _REGISTRY["models"].values():
+            if e.get("state") == "busy":
+                p = e.get("patcher")
+                e["state"] = residency(p) if p is not None else "free"
+                e["ts"] = _now()
 
 
 def _on_model_detach(kind, patcher):
@@ -411,8 +425,19 @@ def status_payload():
     with _LOCK:
         models = []
         for kind, e in _REGISTRY["models"].items():
-            # 低显存彻底卸载后对象引用已释放（patcher=None）→ 显示红色「已卸载」
-            st = "free" if e.get("patcher") is None else residency(e["patcher"])
+            # 新三色语义：
+            #   绿(gpu) = 显存中且正在执行使用（state=busy 且实际在显存）
+            #   黄(cpu) = 闲置：在显存或 CPU 内存中，但无执行使用
+            #   红(free) = 已卸载：权重已释放 / 不在显存也不在内存
+            patcher = e.get("patcher")
+            if patcher is None:
+                st = "free"
+            else:
+                pos = residency(patcher)
+                if e.get("state") == "busy" and pos == "gpu":
+                    st = "gpu"                      # 工作中（绿）
+                else:
+                    st = "cpu" if pos != "free" else "free"  # 闲置（黄）/ 已卸载（红）
             info = STATE_INFO.get(st, STATE_INFO["unknown"])
             mtype = e.get("model_type", "")
             tinfo = MODEL_TYPE_INFO.get(mtype, MODEL_TYPE_INFO["unknown"]) if mtype else None
@@ -913,6 +938,17 @@ def register_routes():
             eager = bool(data.get("eager", False))
             set_switch(on, eager=eager)
             return web.json_response({"ok": True, "switch": get_switch()})
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)[:200]}, status=400)
+
+    @routes.post("/zouyu_model_loader/set_idle")
+    async def _set_idle(request):
+        """前端通知：工作流执行结束（success/error/interrupted）。
+
+        所有「工作中」模型转为「闲置」（黄）：在显存或内存 → 黄；已释放 → 红。"""
+        try:
+            mark_all_idle()
+            return web.json_response({"ok": True})
         except Exception as exc:
             return web.json_response({"ok": False, "error": str(exc)[:200]}, status=400)
 

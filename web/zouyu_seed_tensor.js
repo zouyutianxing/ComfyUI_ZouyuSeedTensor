@@ -495,8 +495,8 @@ function makePortName(zh, d, ordinal) {
 
 // 状态文字保持简短（避免与下拉内文件名文字重叠），位置提示由灯 tooltip 展示
 const STATE_INFO = {
-  gpu: { zh: "已加载", en: "Loaded", color: "#4caf50" },
-  cpu: { zh: "未加载", en: "Not loaded", color: "#ffeb3b" },
+  gpu: { zh: "工作中", en: "In use", color: "#4caf50" },
+  cpu: { zh: "闲置", en: "Idle", color: "#ffeb3b" },
   free: { zh: "已卸载", en: "Unloaded", color: "#f44336" },
   unknown: { zh: "未知", en: "Unknown", color: "#9e9e9e" },
 };
@@ -813,7 +813,7 @@ function updateRowTail(node, overlay, i, rowCY, visible, zh) {
   const stInfo = filled ? (STATE_INFO[(info && info.state) || "unknown"] || STATE_INFO.unknown) : null;
   const light = document.createElement("span");
   light.className = "zouyu-rt-light";
-  light.title = zh ? "绿=已加载(显存) 黄=未加载(内存) 红=已卸载(硬盘)" : "Green=VRAM Yellow=RAM Red=Disk";
+  light.title = zh ? "绿=工作中(显存执行中) 黄=闲置(显存或内存) 红=已卸载(硬盘)" : "Green=In-use(VRAM) Yellow=Idle(RAM/VRAM) Red=Unloaded(Disk)";
   light.style.background = stInfo ? stInfo.color : "#9e9e9e";
   tail.appendChild(light);
   const textEl = document.createElement("span");
@@ -1938,7 +1938,19 @@ app.registerExtension({
   },
 });
 
-// 模型加载器/开关执行完成后立即刷新状态灯与开关下拉（兜底：另有 2.5s 轮询）
+// 工作流执行结束（成功/出错/中断）：所有「工作中」模型 →「闲置」（黄），并刷新灯
+["execution_success", "execution_error", "execution_interrupted"].forEach((evName) => {
+  api.addEventListener(evName, () => {
+    try {
+      fetch("/zouyu_model_loader/set_idle", { method: "POST" }).catch(() => {});
+      for (const ln of [...statusNodes]) {
+        if (ln.comfyClass === "ZouyuModelLoader") refreshStatusDOM(ln);
+      }
+    } catch (e) {
+      /* ignore */
+    }
+  });
+});
 api.addEventListener("executed", (event) => {
   try {
     const detail = event.detail;
