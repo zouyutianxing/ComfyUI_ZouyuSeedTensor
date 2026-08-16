@@ -114,25 +114,15 @@ const BOOL_LABELS = {
 };
 
 const TITLES = {
-  ZouyuSaveSeedConditioning: { zh: "保存种子张量", en: "Save Seed Tensor" },
   ZouyuSeedLoader: { zh: "融合加载器", en: "Seed Loader" },
   ZouyuVAEDecodeAV: { zh: "音视频联合解码", en: "AV VAE Decode" },
-  ZouyuExtractSeedMedia: { zh: "提取参考媒体", en: "Extract Seed Media" },
-  ZouyuSeedCatalog: { zh: "种子目录", en: "Seed Catalog" },
-  ZouyuSeedPreview: { zh: "种子预览", en: "Seed Preview" },
-  ZouyuClearTemp: { zh: "清空临时存储", en: "Clear Temp Storage" },
   ZouyuModelLoader: { zh: "Zouyu 模型加载器", en: "Zouyu Model Loader" },
   ZouyuModelSwitch: { zh: "模型加载开关", en: "Model Load Switch" },
 };
 
 const NODE_COLORS = {
-  ZouyuSaveSeedConditioning: { color: "#2e7d4f", bgcolor: "#16321f" },
   ZouyuSeedLoader: { color: "#7a4fa0", bgcolor: "#2c1a3a" },
   ZouyuVAEDecodeAV: { color: "#2f6b8f", bgcolor: "#162a38" },
-  ZouyuExtractSeedMedia: { color: "#1f8a8a", bgcolor: "#123232" },
-  ZouyuSeedCatalog: { color: "#6b6b6b", bgcolor: "#262626" },
-  ZouyuSeedPreview: { color: "#b0722a", bgcolor: "#3a2812" },
-  ZouyuClearTemp: { color: "#a03838", bgcolor: "#3a1616" },
   ZouyuModelLoader: { color: "#3d8b40", bgcolor: "#142b16" },
   ZouyuModelSwitch: { color: "#8a6d1f", bgcolor: "#2b2310" },
 };
@@ -178,32 +168,6 @@ async function fetchJson(url, options) {
   const r = await fetch(url, options);
   if (!r.ok) throw new Error(r.statusText);
   return r.json();
-}
-
-async function listSeedFiles() {
-  try {
-    const d = await fetchJson("/zouyu_seed_tensor/files");
-    return d.all || [];
-  } catch {
-    return [];
-  }
-}
-
-async function refreshFileComboWidget(widget) {
-  const files = await listSeedFiles();
-  const full = (files || []).filter((f) => String(f).endsWith(".pt"));
-  const values = full.length ? full : ["(暂无文件)"];
-  if (widget.options) widget.options.values = values;
-  if (!values.includes(widget.value)) widget.value = values[0];
-}
-
-async function refreshAllFileCombos() {
-  const nodes = app.graph?._nodes || [];
-  for (const n of nodes) {
-    const w = n.widgets?.find((x) => x.name === "file_name" && x.type === "combo");
-    if (w) await refreshFileComboWidget(w);
-  }
-  app.graph?.setDirtyCanvas(true, false);
 }
 
 // ---------------------------------------------------------------------------
@@ -1965,27 +1929,6 @@ app.registerExtension({
             return r;
           };
         }
-
-        if (comfyClass === "ZouyuExtractSeedMedia" || comfyClass === "ZouyuSeedPreview") {
-          const fw = node.widgets?.find((w) => w.name === "file_name");
-          if (fw) {
-            addButton(node, "🔄 刷新", "🔄 Refresh", async () => {
-              await refreshFileComboWidget(fw);
-              app.graph?.setDirtyCanvas(true, false);
-            });
-          }
-        }
-
-        if (comfyClass === "ZouyuSeedCatalog") {
-          addButton(node, "🗑 清空临时存储", "🗑 Clear Temp", async () => {
-            try {
-              const d = await fetchJson("/zouyu_seed_tensor/clear_temp", { method: "POST" });
-              alert(`已清空临时存储（移除 ${d.removed} 项）`);
-            } catch (e) {
-              alert("清空失败: " + e);
-            }
-          });
-        }
       } catch (e) {
         console.error("[ZouyuSeedTensor] UI setup error:", e);
       }
@@ -1993,11 +1936,6 @@ app.registerExtension({
       return r;
     };
   },
-});
-
-// 后端保存/刷新后自动更新所有文件下拉
-api.addEventListener("Zouyu-seed-files-refresh", () => {
-  refreshAllFileCombos();
 });
 
 // 模型加载器/开关执行完成后立即刷新状态灯与开关下拉（兜底：另有 2.5s 轮询）

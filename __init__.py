@@ -7,7 +7,7 @@ ComfyUI_ZouyuSeedTensor - 种子张量缓存与混合系统（V3 API）
 节点分类: ZouyuAI/SeedTensor
 目录：
 - seeds/  永久存储（长期保留的张量+种子绑定文件）
-- temp/   临时存储（一次性生成任务，完成后可一键清空）
+- temp/   临时存储（一次性生成任务，完成后自动清理）
 """
 
 from aiohttp import web
@@ -18,11 +18,10 @@ from .nodes import ALL_NODES
 from .core import (
     get_seeds_dir, get_temp_dir,
     scan_seed_files, scan_temp_files, scan_all_seed_files,
-    load_catalog, rebuild_catalog, clear_temp_dir,
 )
 from .nodes.model_guard import register_routes as register_model_guard_routes
 
-# 前端扩展目录（中英文切换、@ 下拉、预览、按钮）
+# 前端扩展目录（中英文切换、@ 下拉、状态灯、模型加载器/开关 UI）
 WEB_DIRECTORY = "./web"
 
 
@@ -36,7 +35,7 @@ async def comfy_entrypoint() -> ComfyExtension:
 
 
 # ---------------------------------------------------------------------------
-# HTTP 路由：为前端下拉菜单 / 目录 / 临时清理提供数据
+# HTTP 路由：为前端 @引用 自动补全提供种子文件列表
 # ---------------------------------------------------------------------------
 
 def _register_routes():
@@ -58,31 +57,7 @@ def _register_routes():
             "temp_dir": get_temp_dir(),
         })
 
-    @routes.get("/zouyu_seed_tensor/catalog")
-    async def _catalog(request):
-        cat = load_catalog()
-        cat["temp_files"] = len(scan_temp_files())
-        return web.json_response(cat)
-
-    @routes.post("/zouyu_seed_tensor/refresh")
-    async def _refresh(request):
-        cat = rebuild_catalog()
-        cat["temp_files"] = len(scan_temp_files())
-        try:
-            PromptServer.instance.send_sync("Zouyu-seed-files-refresh", {})
-        except Exception:
-            pass
-        return web.json_response(cat)
-
-    @routes.post("/zouyu_seed_tensor/clear_temp")
-    async def _clear_temp(request):
-        removed = clear_temp_dir()
-        try:
-            PromptServer.instance.send_sync("Zouyu-seed-files-refresh", {})
-        except Exception:
-            pass
-        return web.json_response({"removed": removed, "temp_files": len(scan_temp_files())})
-
 
 _register_routes()
 register_model_guard_routes()
+
