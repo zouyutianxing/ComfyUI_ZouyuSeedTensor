@@ -25,7 +25,8 @@ _REGISTRY = {
     "switch": False,      # 节点1 的低显存开关（True=低显存彻底卸载；False=CPU缓存，开关退化为转接点）
     "switch_ts": 0.0,
     "loader_ts": 0.0,     # 节点1 最近一次执行时间
-    "executing": False,   # 工作流执行中（前端 execution_start/结束 通知 + 后端 send_sync 兜底）
+    "executing": False,   # 工作流执行中（PromptExecutor.add_message 捕获 execution_start/结束，后端独立可靠）
+    "pm_seen": False,     # 本轮执行中 model_patches_models hook 是否捕获过（信号2 健康度：False 时启用官方 currently_used 兜底）
     "models": {},         # kind -> {kind, name, obj, patcher, state, ts}  （加载器执行后登记）
     "configured": {},     # kind -> {kind, tkey, folder, name}               （前端推送的配置，未运行即可用）
     "events": [],         # 日志环形缓冲
@@ -156,13 +157,16 @@ def register(kind, name, obj, model_type="", folder="", tkey=""):
 
 
 def set_exec_state(on):
-    """设置「工作流执行中」标志（前端 execution_start/结束 通知 + 后端 send_sync 兜底）。
+    """设置「工作流执行中」标志（PromptExecutor.add_message 捕获执行事件 + 前端通知双保险）。
 
     on=False（执行结束）时同时清除所有「工作中」标记 → 全部按位置显示闲置/已卸载。
+    on=True（执行开始）时重置 model_patches_models 健康度标记（本轮是否捕获过）。
     """
     with _LOCK:
         _REGISTRY["executing"] = bool(on)
-        if not on:
+        if on:
+            _REGISTRY["pm_seen"] = False
+        else:
             for e in _REGISTRY["models"].values():
                 if e.get("state") == "busy":
                     p = e.get("patcher")
@@ -177,33 +181,70 @@ def _mark_used(kind):
         if e is not None and e.get("patcher") is not None:
             e["state"] = "busy"
             e["ts"] = _now()
+            _REGISTRY["pm_seen"] = True
 
 
 def _mark_used_for_patcher(patcher):
-    """按底层 model 对象匹配登记的模型并标记「正在调用」。
+    """按模型家族匹配登记的模型并标记「正在调用」。
 
-    clone/delegate 共享 self.model（ModelPatcher.get_clone_model_override 返回同一 model），
-    因此采样器等节点 load_models_gpu(clone) 时也能正确标记登记实例（busy/绿）。
+    覆盖任何形态的调用者：登记实例本身、clone（parent 链回溯）、deepcopy-clone（parent 链）、
+    delegate（共享 model）。匹配成功同时标记 model_patches_models hook 健康（pm_seen）。
     """
-    base_model = getattr(patcher, "model", None)
-    if base_model is None:
-        return
     with _LOCK:
         for kind, e in _REGISTRY["models"].items():
             p = e.get("patcher")
-            if p is not None and getattr(p, "model", None) is base_model:
+            if p is not None and _same_model_family(p, patcher):
                 e["state"] = "busy"
                 e["ts"] = _now()
+                _REGISTRY["pm_seen"] = True
                 break
 
 
 def _same_model_family(e_patcher, patcher):
-    """登记 patcher 与触发回调的 patcher 是否同一模型族（clone/delegate 共享底层 model）。"""
+    """登记 patcher 与调用者 patcher 是否同一模型族。
+
+    三重匹配（由强到弱）：
+    1. 同一实例；
+    2. 底层 model 对象相同（clone/delegate 共享 self.model，get_clone_model_override 返回同一 model）；
+    3. parent 链回溯（官方 ModelPatcher.clone 总是 n.parent = self，含 force_deepcopy；
+       LoadedModel 内部也依赖 model.parent 跟踪 clone 关系，见 model_management.py:752）。
+    """
+    if e_patcher is None or patcher is None:
+        return False
     if e_patcher is patcher:
         return True
     m1 = getattr(e_patcher, "model", None)
     m2 = getattr(patcher, "model", None)
-    return m1 is not None and m1 is m2
+    if m1 is not None and m1 is m2:
+        return True
+    cur = getattr(patcher, "parent", None)
+    seen = set()
+    while cur is not None and id(cur) not in seen:
+        if cur is e_patcher:
+            return True
+        seen.add(id(cur))
+        cur = getattr(cur, "parent", None)
+    return False
+
+
+def _in_currently_used(e_patcher):
+    """登记模型是否被官方标记「正在使用」（底层兜底信号，只读官方状态，零冲突）。
+
+    ComfyUI 的 load_models_gpu 对每个传入模型无条件置 LoadedModel.currently_used=True
+    （model_management.py:944），current_loaded_models 记录全部已加载模型（含 clone）。
+    因此即使 model_patches_models hook 因第三方插件替换而失效，只要模型真被
+    load_models_gpu 使用过，这里仍能匹配（不 miss）。粒度=执行周期（used 不清除）。
+    """
+    try:
+        for loaded in model_management.current_loaded_models:
+            lm = loaded.model
+            if lm is None or not loaded.currently_used:
+                continue
+            if _same_model_family(e_patcher, lm):
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def clear_busy():
@@ -572,20 +613,27 @@ def _do_unload_model(e, name, label, zh):
 def status_payload():
     with _LOCK:
         models = []
-        # 精确三色语义（完全实时判定）：
-        #   绿(gpu) = 工作流执行中 且当前节点 load_models_gpu 正在调用该模型（state=busy）且实际在显存
+        # 精确三色语义（多重信号冗余，任何场景不 miss）：
+        #   绿(gpu) = 工作流执行中 且该模型正被 load_models_gpu 调用
+        #     - 主信号：model_patches_models hook（节点粒度，busy，可被 clear_busy 清除）
+        #     - 兜底信号：官方 current_loaded_models 的 currently_used（只读；仅当主信号
+        #       本轮完全未捕获时启用——主信号被第三方插件替换等极端情况）
         #   黄(cpu) = 闲置：在显存或 CPU 内存中，但当前节点未调用
         #   红(free) = 已卸载：权重已释放 / 不在显存也不在内存
         executing = bool(_REGISTRY.get("executing"))
+        pm_works = bool(_REGISTRY.get("pm_seen"))
         for kind, e in _REGISTRY["models"].items():
             patcher = e.get("patcher")
             if patcher is None:
                 st = "free"
-            elif executing and e.get("state") == "busy":
-                # 工作中（绿）：当前节点正在调用该模型。load_models_gpu 对传入模型
-                # 无条件调用 model_patches_models()（调用发生在实际加载前，此时模型
-                # 位置尚未更新），因此 busy 本身即「正在被调用」的可靠信号，直接绿。
-                st = "gpu"
+            elif executing:
+                if pm_works:
+                    # 主信号（节点粒度）：busy = 当前节点 load_models_gpu 正在调用
+                    busy = e.get("state") == "busy"
+                else:
+                    # 兜底信号（官方底层）：模型本轮被 load_models_gpu 使用过（currently_used）
+                    busy = _in_currently_used(patcher)
+                st = "gpu" if busy else ("cpu" if residency(patcher) != "free" else "free")
             else:
                 # 位置：回调快照（ON_LOAD/ON_DETACH，clone 场景也准确）优先；无快照时实时计算
                 pos = e.get("state")

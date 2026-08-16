@@ -561,10 +561,10 @@ async function refreshStatusDOM(node) {
 
 function startStatusPolling() {
   if (statusTimer) return;
-  // 1s 轮询：提高「工作中/闲置/已卸载」状态变化的实时性
+  // 500ms 轮询：低延迟反映「工作中/闲置/已卸载」状态变化
   statusTimer = setInterval(async () => {
     for (const node of [...statusNodes]) await refreshStatusDOM(node);
-  }, 1000);
+  }, 500);
 }
 
 // ===========================================================================
