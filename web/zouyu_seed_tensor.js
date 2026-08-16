@@ -1542,7 +1542,7 @@ function setupModelLoaderNode(node) {
   ensureLoaderOverlayStyle();
 
   // 重构：widget 控件值 = 唯一状态源（不再维护 slots 副本，杜绝状态漂移/配置丢失）。
-  // __zouyuSlotState 仅保存文件选项缓存与语言等辅助信息。
+  // __zouyuSlotState 仅保存文件选项缓存等辅助信息。
   node.__zouyuSlotState = { files: {} };
   node.__zouyuLang = getLang();
   node.__zouyuStatus = {};
@@ -1554,52 +1554,78 @@ function setupModelLoaderNode(node) {
     Promise.resolve(pushLoaderConfig(node)).then(() => refreshAllSwitchCombos());
   };
 
-  // 所有槽位初始归一化：旧分类名 → 有效类型
-  normalizeTypeWidgets(node);
   // 新节点：schema 默认「未使用」→「其他」（自动识别），保证每个下拉都有完整模型选项；
-  // 旧工作流加载走 onAfterGraphConfigured，那里的空槽位保留「未使用」以清理残留
+  // 旧工作流加载走 configure 路径，空槽位保留「未使用」以清理残留
   for (let i = 0; i < MAX_MODELS; i++) {
     const tw = slotWidgets(node, i).type;
     if (tw && tw.value === "未使用") tw.value = "其他";
   }
 
-  for (let i = 0; i < MAX_MODELS; i++) {
-    const w = slotWidgets(node, i);
-    if (w.type) {
-      const origTypeCb = w.type.callback;
-      w.type.callback = (v) => {
-        const nv = normalizeType(v);
-        if (nv !== v) w.type.value = nv;
-        if (origTypeCb) origTypeCb.call(w.type, nv);
-        applySlotVisibility(node);
-        configDirty();
-      };
-    }
-    if (w.name) {
-      const origNameCb = w.name.callback;
-      w.name.callback = (v) => {
-        if (origNameCb) origNameCb.call(w.name, v);
-        // 用户在「未使用」槽位选模型 → 自动启用（类型改为「其他」= 自动识别）
-        if (slotTypeOf(node, i) === "未使用" && v && v !== "(未选择)" && v !== "(无文件)" && w.type) {
-          w.type.value = "其他";
-        }
-        applySlotVisibility(node);
-        // 预刷新下一个下拉的模型选项（选好当前模型后，新出现的下拉立即可选）
-        if (i + 1 < MAX_MODELS && v && v !== "(未选择)" && v !== "(无文件)") {
-          refreshSlotFileOptions(node, i + 1);
-        }
-        configDirty();
-      };
-    }
-    if (w.folder) {
-      const origFolderCb = w.folder.callback;
-      w.folder.callback = (v) => {
-        if (origFolderCb) origFolderCb.call(w.folder, v);
-        refreshSlotFileOptions(node, i);
-        configDirty();
-      };
+  // 参考社区（rgthree）方案：框架 configure 会重建控件（重置 hidden、覆盖回调），
+  // 因此包装 node.configure，每次重建后自动重新应用显隐与回调，杜绝「中途」状态丢失
+  const origConfigure = node.configure ? node.configure.bind(node) : null;
+  if (origConfigure) {
+    node.configure = function (info) {
+      const r = origConfigure(info);
+      try { reattachLoaderLogic(node); } catch (e) { /* ignore */ }
+      return r;
+    };
+  }
+
+  // 幂等挂载槽位回调（configure 重建后可重复调用，不会重复包装）
+  function mountSlotCallbacks() {
+    for (let i = 0; i < MAX_MODELS; i++) {
+      const w = slotWidgets(node, i);
+      if (w.type && !w.type.__zouyuWrapped) {
+        w.type.__zouyuWrapped = true;
+        const orig = w.type.callback;
+        w.type.callback = (v) => {
+          const nv = normalizeType(v);
+          if (nv !== v) w.type.value = nv;
+          if (orig) orig.call(w.type, nv);
+          applySlotVisibility(node);
+          configDirty();
+        };
+      }
+      if (w.name && !w.name.__zouyuWrapped) {
+        w.name.__zouyuWrapped = true;
+        const orig = w.name.callback;
+        w.name.callback = (v) => {
+          if (orig) orig.call(w.name, v);
+          // 用户在「未使用」槽位选模型 → 自动启用（类型改为「其他」= 自动识别）
+          if (slotTypeOf(node, i) === "未使用" && v && v !== "(未选择)" && v !== "(无文件)" && w.type) {
+            w.type.value = "其他";
+          }
+          applySlotVisibility(node);
+          // 预刷新下一个下拉的模型选项（选好当前模型后，新出现的下拉立即可选）
+          if (i + 1 < MAX_MODELS && v && v !== "(未选择)" && v !== "(无文件)") {
+            refreshSlotFileOptions(node, i + 1);
+          }
+          configDirty();
+        };
+      }
+      if (w.folder && !w.folder.__zouyuWrapped) {
+        w.folder.__zouyuWrapped = true;
+        const orig = w.folder.callback;
+        w.folder.callback = (v) => {
+          if (orig) orig.call(w.folder, v);
+          refreshSlotFileOptions(node, i);
+          configDirty();
+        };
+      }
     }
   }
+
+  // 重新应用全部加载器逻辑（configure 重建后调用）
+  function reattach() {
+    normalizeTypeWidgets(node);
+    mountSlotCallbacks();
+    applySlotVisibility(node);
+    pushLoaderConfig(node);
+    refreshAllSwitchCombos();
+  }
+  node.__zouyuReattach = reattach;
+
   const compactW = node.widgets.find((w) => w.name === "compact_mode");
   if (compactW) {
     const orig = compactW.callback;
@@ -1633,7 +1659,7 @@ function setupModelLoaderNode(node) {
   }
 
   applyLoaderLabels(node);
-  applySlotVisibility(node);
+  reattach();
   // 只刷新可见槽位的文件下拉（避免多余请求）
   const visCnt = visibleSlotCount(node);
   for (let i = 0; i < visCnt; i++) {
@@ -1648,10 +1674,8 @@ function setupModelLoaderNode(node) {
   const origCfg = node.onAfterGraphConfigured;
   node.onAfterGraphConfigured = function (...args) {
     try {
-      applySlotVisibility(node);
+      reattach();
       applyLoaderLabels(node);
-      pushLoaderConfig(node);
-      refreshAllSwitchCombos();
     } catch (e) { /* ignore */ }
     const r = origCfg ? origCfg.apply(this, args) : undefined;
     return r;
@@ -1673,17 +1697,13 @@ function setupModelLoaderNode(node) {
   // 延时重同步：防止框架在 onNodeCreated 后重建控件覆盖显隐/回调；并兜底工作流值恢复
   setTimeout(() => {
     try {
-      applySlotVisibility(node);
+      node.__zouyuReattach && node.__zouyuReattach();
       applyLoaderLabels(node);
-      pushLoaderConfig(node);
-      refreshAllSwitchCombos();
     } catch (e) { /* ignore */ }
   }, 150);
   setTimeout(() => {
     try {
-      applySlotVisibility(node);
-      pushLoaderConfig(node);
-      refreshAllSwitchCombos();
+      node.__zouyuReattach && node.__zouyuReattach();
     } catch (e) { /* ignore */ }
   }, 600);
   // 初始推送一次（界面新建节点即让开关下拉可见）
@@ -1696,6 +1716,19 @@ function setupModelSwitchNode(node) {
   node.__zouyuLang = getLang();
   statusNodes.add(node);
   startStatusPolling();
+
+  // 框架 configure 会重建控件（重置下拉选项/回调），configure 后重新刷新下拉与副标题
+  const origConfigure = node.configure ? node.configure.bind(node) : null;
+  if (origConfigure) {
+    node.configure = function (info) {
+      const r = origConfigure(info);
+      try {
+        applySwitchSubtitle(node);
+        refreshSwitchModelCombo(node);
+      } catch (e) { /* ignore */ }
+      return r;
+    };
+  }
 
   // 『动作』开关 → 副标题实时显示 加载/卸载
   const aw = node.widgets?.find((w) => w.name === "action");
