@@ -25,6 +25,7 @@ _REGISTRY = {
     "switch": False,      # 节点1 的低显存开关（True=低显存彻底卸载；False=CPU缓存，开关退化为转接点）
     "switch_ts": 0.0,
     "loader_ts": 0.0,     # 节点1 最近一次执行时间
+    "executing": False,   # 工作流执行中（前端 execution_start/结束 通知 + 后端 send_sync 兜底）
     "models": {},         # kind -> {kind, name, obj, patcher, state, ts}  （加载器执行后登记）
     "configured": {},     # kind -> {kind, tkey, folder, name}               （前端推送的配置，未运行即可用）
     "events": [],         # 日志环形缓冲
@@ -133,11 +134,11 @@ def register(kind, name, obj, model_type="", folder="", tkey=""):
     """节点1 每次执行后登记模型（同 kind 旧条目被替换，旧 patcher 交由 GC 回收）。
 
     folder/tkey 记录模型来源，供"模型加载开关"节点按需重新加载。
+    状态由 status_payload 实时判定（执行中 + ComfyUI currently_used + 位置），
+    登记时仅按位置初始化，不预设「工作中」。
     """
     with _LOCK:
         patcher = _patcher_of(obj)
-        # 加载器执行 = 模型参与当前工作流执行 → 标记「工作中」（绿）；
-        # 前端在执行结束时通知 mark_all_idle()，转为「闲置」（黄）
         _REGISTRY["models"][kind] = {
             "kind": kind,
             "name": name,
@@ -146,17 +147,38 @@ def register(kind, name, obj, model_type="", folder="", tkey=""):
             "model_type": model_type,
             "folder": folder,
             "tkey": tkey,
-            "state": "busy" if patcher is not None else "free",
+            "state": residency(patcher) if patcher is not None else "free",
             "ts": _now(),
         }
         _REGISTRY["loader_ts"] = _now()
     _attach_model_callbacks(patcher, kind)
 
 
+def set_exec_state(on):
+    """设置「工作流执行中」标志（前端 execution_start/结束 通知 + 后端 send_sync 兜底）。"""
+    with _LOCK:
+        _REGISTRY["executing"] = bool(on)
+
+
+def _is_model_used(patcher):
+    """ComfyUI 官方语义：模型是否正在被当前执行使用。
+
+    `load_models_gpu` 使用模型时会把对应的 LoadedModel.currently_used 置 True，
+    卸载时（free_memory）置 False。无需 hook 全局函数，与其它插件零冲突。
+    """
+    try:
+        for lm in model_management.current_loaded_models:
+            if lm.model is patcher and lm.currently_used:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _attach_model_callbacks(patcher, kind):
     """在模型 patcher 上挂载位置检测回调（幂等，纯检测模型位置）：
-    - ON_LOAD ：模型被官方加载到显存 → 标记「工作中」（绿）。
-    - ON_DETACH：模型被官方模型管理卸载（其它模型需要显存时）→ 更新为「闲置/已卸载」。
+    - ON_LOAD ：模型被官方加载到显存 → 更新位置快照。
+    - ON_DETACH：模型被官方模型管理卸载（其它模型需要显存时）→ 更新位置快照。
       该机制与 guard 节点摆放位置无关，保证状态灯始终反映模型真实位置。
     """
     try:
@@ -170,38 +192,24 @@ def _attach_model_callbacks(patcher, kind):
 
 
 def _on_model_load(kind, patcher):
-    """模型被加载到显存（即将被使用）：标记「工作中」（绿）。"""
+    """模型被加载到显存：更新位置快照（是否「工作中」由 status_payload 结合执行状态实时判定）。"""
     with _LOCK:
         e = _REGISTRY["models"].get(kind)
         if e is not None and e["patcher"] is patcher:
-            e["state"] = "busy"
+            e["state"] = residency(patcher)
             e["ts"] = _now()
 
 
-def mark_all_idle():
-    """工作流执行结束：所有「工作中」模型转为「闲置」（黄）。
-
-    位置判定：对象仍在（显存或内存）→ 闲置（黄）；对象已释放（patcher=None）→ 已卸载（红）。
-    """
-    with _LOCK:
-        for e in _REGISTRY["models"].values():
-            if e.get("state") == "busy":
-                p = e.get("patcher")
-                e["state"] = residency(p) if p is not None else "free"
-                e["ts"] = _now()
-
-
 def _install_busy_detection():
-    """安装「模型是否正在工作」的检测（不改变任何功能）。
+    """安装「工作流执行中」检测（不改变任何功能）。
 
-    仅 hook `PromptServer.send_sync`：捕获 execution_success/error/interrupted（执行结束）
-    → 所有「工作中」模型转「闲置」（黄）。后端兜底，纯 API 提交（不经前端）也能正确复位。
+    hook `PromptServer.send_sync`：捕获 execution_start（执行开始）与
+    execution_success/error/interrupted（执行结束）→ 更新 executing 标志。
+    后端兜底，纯 API 提交（不经前端）也能正确复位。
 
-    说明：**不** hook `model_management.load_models_gpu`——该全局函数常被其它插件包装
-    （如 ComfyUI-Dev-Utils 的 dev_utils_send_sync），其包装函数不一定接收
-    memory_required 等关键字参数，串接会抛 TypeError 中断执行。
-    我们注册表里的模型都经由「模型加载器」登记（register 即标记「工作中」），
-    执行期间保持绿、执行结束转黄，已能准确反映状态，无需全局 hook。
+    「工作中」（绿）的精确判定完全依赖 ComfyUI 官方 `LoadedModel.currently_used`
+    （load_models_gpu 使用模型时置 True），无需 hook 全局 load_models_gpu，
+    与 ComfyUI-Dev-Utils 等插件零冲突。
     """
     try:
         from server import PromptServer
@@ -212,8 +220,10 @@ def _install_busy_detection():
 
             def wrapped(event, data, sid=None):
                 try:
-                    if event in ("execution_success", "execution_error", "execution_interrupted"):
-                        mark_all_idle()
+                    if event == "execution_start":
+                        set_exec_state(True)
+                    elif event in ("execution_success", "execution_error", "execution_interrupted"):
+                        set_exec_state(False)
                 except Exception:
                     pass
                 return orig(event, data, sid)
@@ -334,11 +344,12 @@ def _slot_label(kind, zh, e=None, cfg=None):
     return kind
 
 
-def load_or_unload_model(kind, do_load, zh, in_execution=False):
+def load_or_unload_model(kind, do_load, zh):
     """模型加载开关：按信号执行 加载 / 卸载。
 
-    in_execution=True（开关节点在工作流执行中触发）：加载后标记「工作中」（绿）；
-    in_execution=False（手动 slot_action 触发）：加载后按位置显示「闲置」（黄）。
+    是否「工作中」（绿）由 status_payload 结合 ComfyUI currently_used 实时判定：
+    开关节点/手动加载都会调用 load_models_gpu → ComfyUI 标记 currently_used →
+    执行中即显示绿；非执行（手动）自动显示黄。无需区分调用来源。
 
     卸载策略由「模型加载器」的低显存模式开关决定（加载器执行/前端切换时 set_switch 登记）：
     - 低显存模式开启（彻底卸载）：卸载信号 → 把模型从显存+CPU内存彻底卸载（红色「已卸载」）；
@@ -358,8 +369,8 @@ def load_or_unload_model(kind, do_load, zh, in_execution=False):
     label = _slot_label(kind, zh, e=e, cfg=cfg)
     if do_load:
         if e is not None:
-            return _do_load_model(e, name, label, zh, in_execution=in_execution)
-        return _do_load_config(kind, cfg, name, label, zh, in_execution=in_execution)
+            return _do_load_model(e, name, label, zh)
+        return _do_load_config(kind, cfg, name, label, zh)
     # 卸载：CPU缓存模式（开关关闭）否决/屏蔽卸载信号——不主动干预模型，
     # 完全交由官方模型管理（官方在显存压力时自动卸载，权重保留在内存，黄色「未加载」）；
     # 低显存模式（开关开启）才执行彻底卸载（显存+CPU权重释放，红色「已卸载」）。
@@ -372,7 +383,7 @@ def load_or_unload_model(kind, do_load, zh, in_execution=False):
     return _do_unload_model(e, name, label, zh)
 
 
-def _do_load_config(kind, cfg, name, label, zh, in_execution=False):
+def _do_load_config(kind, cfg, name, label, zh):
     """仅有配置未运行：直接从配置的文件加载并登记到注册表。"""
     try:
         from .model_loader import _load_slot_model
@@ -380,17 +391,11 @@ def _do_load_config(kind, cfg, name, label, zh, in_execution=False):
         folder = cfg.get("folder", "")
         obj, actual, note = _load_slot_model(tkey, folder, cfg.get("name", ""))
         register(kind, cfg.get("name", ""), obj, model_type=actual, folder=folder, tkey=tkey)
-        # 加载后立即载入显存；非工作流执行（手动）→ 转「闲置」（黄）
+        # 加载后立即载入显存（「工作中/闲置」由 status_payload 实时判定）
         try:
             patcher = _patcher_of(obj)
             if patcher is not None:
                 model_management.load_model_gpu(patcher)
-                if not in_execution:
-                    with _LOCK:
-                        cur = _REGISTRY["models"].get(kind)
-                        if cur is not None:
-                            cur["state"] = residency(patcher)
-                            cur["ts"] = _now()
         except Exception:
             pass
         return ("已加载 {} {}（{}）".format(label, name, note or "显存")
@@ -400,7 +405,7 @@ def _do_load_config(kind, cfg, name, label, zh, in_execution=False):
                 if zh else "load {} failed: {}".format(name, str(exc)[:80]))
 
 
-def _do_load_model(e, name, label, zh, in_execution=False):
+def _do_load_model(e, name, label, zh):
     """加载：优先把现有 patcher 载入显存（保持下游对象一致）；失败则按登记文件重载。"""
     kind = e["kind"]
     patcher = e.get("patcher")
@@ -410,8 +415,8 @@ def _do_load_model(e, name, label, zh, in_execution=False):
             with _LOCK:
                 cur = _REGISTRY["models"].get(kind)
                 if cur is not None:
-                    # 工作流执行中（开关信号）→ 标记「工作中」（绿）；手动 → 按位置（闲置/黄）
-                    cur["state"] = "busy" if in_execution else residency(patcher)
+                    # 「工作中/闲置」由 status_payload 结合 currently_used 实时判定
+                    cur["state"] = residency(patcher)
                     cur["ts"] = _now()
             return ("已加载 {} {}（{}）".format(label, name, "显存")
                     if zh else "loaded {} {} (VRAM)".format(label, name))
@@ -466,17 +471,18 @@ def _do_unload_model(e, name, label, zh):
 def status_payload():
     with _LOCK:
         models = []
+        # 精确三色语义（完全实时判定）：
+        #   绿(gpu) = 工作流执行中 且 ComfyUI currently_used（模型正在被 load_models_gpu 使用）且实际在显存
+        #   黄(cpu) = 闲置：在显存或 CPU 内存中，但当前无执行使用
+        #   红(free) = 已卸载：权重已释放 / 不在显存也不在内存
+        executing = bool(_REGISTRY.get("executing"))
         for kind, e in _REGISTRY["models"].items():
-            # 新三色语义：
-            #   绿(gpu) = 显存中且正在执行使用（state=busy 且实际在显存）
-            #   黄(cpu) = 闲置：在显存或 CPU 内存中，但无执行使用
-            #   红(free) = 已卸载：权重已释放 / 不在显存也不在内存
             patcher = e.get("patcher")
             if patcher is None:
                 st = "free"
             else:
                 pos = residency(patcher)
-                if e.get("state") == "busy" and pos == "gpu":
+                if executing and _is_model_used(patcher) and pos == "gpu":
                     st = "gpu"                      # 工作中（绿）
                 else:
                     st = "cpu" if pos != "free" else "free"  # 闲置（黄）/ 已卸载（红）
@@ -813,7 +819,7 @@ def slot_action(kind, action):
     """手动控制槽位模型：action ∈ {"load", "unload"}，返回说明文字（卸载深度由加载器低显存模式决定）。"""
     do_load = action == "load"
     # 手动触发（非工作流执行）：加载后按位置显示「闲置」（黄）
-    msg = load_or_unload_model(kind, do_load, True, in_execution=False)
+    msg = load_or_unload_model(kind, do_load, True)
     log_event(msg)
     return msg
 
@@ -987,14 +993,16 @@ def register_routes():
         except Exception as exc:
             return web.json_response({"ok": False, "error": str(exc)[:200]}, status=400)
 
-    @routes.post("/zouyu_model_loader/set_idle")
-    async def _set_idle(request):
-        """前端通知：工作流执行结束（success/error/interrupted）。
+    @routes.post("/zouyu_model_loader/set_exec_state")
+    async def _set_exec_state(request):
+        """前端通知：工作流执行开始/结束（execution_start / success / error / interrupted）。
 
-        所有「工作中」模型转为「闲置」（黄）：在显存或内存 → 黄；已释放 → 红。"""
+        设置「执行中」标志；「工作中（绿）」由 status_payload 结合 ComfyUI currently_used
+        实时判定，执行结束（on=false）后所有模型自动按位置显示「闲置（黄）/已卸载（红）」。"""
         try:
-            mark_all_idle()
-            return web.json_response({"ok": True})
+            data = await request.json()
+            set_exec_state(bool(data.get("on", False)))
+            return web.json_response({"ok": True, "executing": bool(_REGISTRY.get("executing"))})
         except Exception as exc:
             return web.json_response({"ok": False, "error": str(exc)[:200]}, status=400)
 
@@ -1055,7 +1063,7 @@ class ZouyuModelSwitch(io.ComfyNode):
                 text = msg
             else:
                 # 开关节点在工作流执行中触发 → 加载后标记「工作中」（绿）
-                msg = load_or_unload_model(model, bool(action), zh, in_execution=True)
+                msg = load_or_unload_model(model, bool(action), zh)
                 log_event(msg)
                 text = msg
         else:

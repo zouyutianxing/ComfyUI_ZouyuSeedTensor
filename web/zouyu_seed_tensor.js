@@ -1939,18 +1939,20 @@ app.registerExtension({
   },
 });
 
-// 工作流执行结束（成功/出错/中断）：所有「工作中」模型 →「闲置」（黄），并刷新灯
+// 工作流执行开始/结束：通知后端「执行中」标志（配合 ComfyUI currently_used 精确判定工作中/闲置）
+const setExecState = (on) => {
+  fetch("/zouyu_model_loader/set_exec_state", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ on }),
+  }).catch(() => {});
+  for (const ln of [...statusNodes]) {
+    if (ln.comfyClass === "ZouyuModelLoader") refreshStatusDOM(ln);
+  }
+};
+api.addEventListener("execution_start", () => setExecState(true));
 ["execution_success", "execution_error", "execution_interrupted"].forEach((evName) => {
-  api.addEventListener(evName, () => {
-    try {
-      fetch("/zouyu_model_loader/set_idle", { method: "POST" }).catch(() => {});
-      for (const ln of [...statusNodes]) {
-        if (ln.comfyClass === "ZouyuModelLoader") refreshStatusDOM(ln);
-      }
-    } catch (e) {
-      /* ignore */
-    }
-  });
+  api.addEventListener(evName, () => setExecState(false));
 });
 api.addEventListener("executed", (event) => {
   try {
