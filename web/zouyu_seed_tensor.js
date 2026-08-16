@@ -445,7 +445,7 @@ function addButton(node, keyZh, keyEn, onClick) {
 }
 
 // ---------------------------------------------------------------------------
-// 模型加载器 / 模型加载开关：文件夹选择、文件刷新、红/绿/蓝状态灯 + 状态文字
+// 模型加载器 / 模型加载开关：文件夹选择、文件刷新、红/绿/黄状态灯 + 状态文字
 // ---------------------------------------------------------------------------
 
 const MAX_MODELS = 8;
@@ -496,7 +496,7 @@ function makePortName(zh, d, ordinal) {
 // 状态文字保持简短（避免与下拉内文件名文字重叠），位置提示由灯 tooltip 展示
 const STATE_INFO = {
   gpu: { zh: "已加载", en: "Loaded", color: "#4caf50" },
-  cpu: { zh: "未加载", en: "Not loaded", color: "#2196f3" },
+  cpu: { zh: "未加载", en: "Not loaded", color: "#ffeb3b" },
   free: { zh: "已卸载", en: "Unloaded", color: "#f44336" },
   unknown: { zh: "未知", en: "Unknown", color: "#9e9e9e" },
 };
@@ -525,7 +525,7 @@ async function refreshStatusDOM(node) {
     for (const [kind, info] of Object.entries(node.__zouyuStatus)) {
       const m = byKind[kind];
       const st = STATE_INFO[m?.state || "unknown"];
-      // 行尾/画布：三色灯 + 状态文字（绿=已加载(显存) 蓝=未加载(内存) 红=已卸载(硬盘)）
+      // 行尾/画布：三色灯 + 状态文字（绿=已加载(显存) 黄=未加载(内存) 红=已卸载(硬盘)）
       info.color = st.color;
       info.state = m?.state || "unknown";
       info.zh = st.zh;
@@ -813,7 +813,7 @@ function updateRowTail(node, overlay, i, rowCY, visible, zh) {
   const stInfo = filled ? (STATE_INFO[(info && info.state) || "unknown"] || STATE_INFO.unknown) : null;
   const light = document.createElement("span");
   light.className = "zouyu-rt-light";
-  light.title = zh ? "绿=已加载(显存) 蓝=未加载(内存) 红=已卸载(硬盘)" : "Green=VRAM Blue=RAM Red=Disk";
+  light.title = zh ? "绿=已加载(显存) 黄=未加载(内存) 红=已卸载(硬盘)" : "Green=VRAM Yellow=RAM Red=Disk";
   light.style.background = stInfo ? stInfo.color : "#9e9e9e";
   tail.appendChild(light);
   const textEl = document.createElement("span");

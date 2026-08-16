@@ -2,7 +2,7 @@
 Zouyu Model Guard — 共享模型状态注册表 + 节点2（模型加载开关 ZouyuModelSwitch）。
 
 共享注册表：模型加载器（节点1）每次执行后登记模型，模型加载开关（节点2）按信号
-触发加载/卸载任务，HTTP 路由（前端轮询红/绿/蓝状态灯与状态文字）互通。
+触发加载/卸载任务，HTTP 路由（前端轮询红/绿/黄状态灯与状态文字）互通。
 """
 
 import os
@@ -49,11 +49,11 @@ SLOT_TYPE_LABELS = {
     "unknown":   {"zh": "未知",    "en": "Unknown"},
 }
 
-# 三色状态灯：绿=已加载(显存) / 蓝=未加载(CPU内存，未被显存加载) / 红=已卸载(硬盘)
+# 三色状态灯：绿=已加载(显存) / 黄=未加载(CPU内存，未被显存加载) / 红=已卸载(硬盘)
 # 主文字保持简短（避免与下拉内文件名文字重叠），位置提示由前端灯 tooltip 展示
 STATE_INFO = {
     "gpu":     {"zh": "已加载", "en": "Loaded",       "color": "#4caf50"},
-    "cpu":     {"zh": "未加载", "en": "Not loaded",   "color": "#2196f3"},
+    "cpu":     {"zh": "未加载", "en": "Not loaded",   "color": "#ffeb3b"},
     "free":    {"zh": "已卸载", "en": "Unloaded",     "color": "#f44336"},
     "unknown": {"zh": "未知",   "en": "Unknown",      "color": "#9e9e9e"},
 }
@@ -155,7 +155,7 @@ def _attach_model_callbacks(patcher, kind):
     """在模型 patcher 上挂载位置检测回调（幂等，纯检测模型位置）：
     - ON_LOAD ：模型被官方加载到显存 → 实时更新状态（绿=显存）。
     - ON_DETACH：模型被官方模型管理卸载（其它模型需要显存时）→ 实时更新状态
-      （蓝=CPU内存；低显存模式下动态模型再释放 CPU 权重 → 红=已卸载）。
+      （黄=CPU内存；低显存模式下动态模型再释放 CPU 权重 → 红=已卸载）。
       该机制与 guard 节点摆放位置无关，保证状态灯始终反映模型真实位置。
     """
     try:
@@ -181,7 +181,7 @@ def _on_model_detach(kind, patcher):
     """模型被官方模型管理卸载：状态灯更新为真实位置（纯检测，不依赖模式开关）。
 
     低显存模式下额外释放动态模型的 CPU 权重（动态模型可释放，状态 → 红）；
-    CPU缓存模式下只更新位置（蓝=权重保留在内存），不主动干预。
+    CPU缓存模式下只更新位置（黄=权重保留在内存），不主动干预。
     """
     freed = 0
     try:
@@ -251,7 +251,7 @@ def register_config(slots):
             }
             # 仅当配置的模型与已登记模型不同时才使旧登记失效。
             # 前端每次 configure/reattach 都会重复推送相同配置，若无条件 pop，
-            # 已加载/已登记的模型会被清成「已卸载」（红灯），蓝/绿灯无法保持。
+            # 已加载/已登记的模型会被清成「已卸载」（红灯），黄/绿灯无法保持。
             old = _REGISTRY["models"].get(kind)
             if old is not None and old.get("name") != name:
                 _REGISTRY["models"].pop(kind, None)
@@ -294,7 +294,7 @@ def load_or_unload_model(kind, do_load, zh):
     卸载策略由「模型加载器」的低显存模式开关决定（加载器执行/前端切换时 set_switch 登记）：
     - 低显存模式开启（彻底卸载）：卸载信号 → 把模型从显存+CPU内存彻底卸载（红色「已卸载」）；
     - 低显存模式关闭（CPU缓存）：否决/屏蔽卸载信号，不主动干预模型，完全交由官方模型管理
-      （官方在显存压力时自动卸载，权重保留在内存，蓝色「未加载」）。
+      （官方在显存压力时自动卸载，权重保留在内存，黄色「未加载」）。
     优先操作已登记（执行过加载器）的模型对象；只有配置未运行时：
     - 加载 → 直接从配置的文件加载并登记；
     - 卸载 → 提示尚未加载。
@@ -312,7 +312,7 @@ def load_or_unload_model(kind, do_load, zh):
             return _do_load_model(e, name, label, zh)
         return _do_load_config(kind, cfg, name, label, zh)
     # 卸载：CPU缓存模式（开关关闭）否决/屏蔽卸载信号——不主动干预模型，
-    # 完全交由官方模型管理（官方在显存压力时自动卸载，权重保留在内存，蓝色「未加载」）；
+    # 完全交由官方模型管理（官方在显存压力时自动卸载，权重保留在内存，黄色「未加载」）；
     # 低显存模式（开关开启）才执行彻底卸载（显存+CPU权重释放，红色「已卸载」）。
     if e is None:
         return ("{} 尚未被加载器加载（未运行或加载失败），无法卸载".format(label)
@@ -331,7 +331,7 @@ def _do_load_config(kind, cfg, name, label, zh):
         folder = cfg.get("folder", "")
         obj, actual, note = _load_slot_model(tkey, folder, cfg.get("name", ""))
         register(kind, cfg.get("name", ""), obj, model_type=actual, folder=folder, tkey=tkey)
-        # 加载后立即载入显存，状态灯变绿（否则显示「未加载」蓝灯，加载看起来无效）
+        # 加载后立即载入显存，状态灯变绿（否则显示「未加载」黄灯，加载看起来无效）
         try:
             patcher = _patcher_of(obj)
             if patcher is not None:
