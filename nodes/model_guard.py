@@ -136,10 +136,12 @@ def register(kind, name, obj, model_type="", folder="", tkey=""):
     folder/tkey 记录模型来源，供"模型加载开关"节点按需重新加载。
     状态由 status_payload 实时判定：当前节点 load_models_gpu 调用的模型 = 工作中（绿），
     其余按位置显示闲置（黄）/已卸载（红）。
+    保存模型身份（clone_base_uuid + 权重规模）：缓存命中（加载器不重新执行）或
+    彻底卸载（patcher=None）后，仍能按身份匹配官方 current_loaded_models 判定「工作中」。
     """
     with _LOCK:
         patcher = _patcher_of(obj)
-        _REGISTRY["models"][kind] = {
+        e = {
             "kind": kind,
             "name": name,
             "obj": obj,
@@ -150,9 +152,21 @@ def register(kind, name, obj, model_type="", folder="", tkey=""):
             "state": residency(patcher) if patcher is not None else "free",
             "ts": _now(),
         }
+        if patcher is not None:
+            e["clone_base_uuid"] = getattr(patcher, "clone_base_uuid", None)
+            e["model_size"] = _safe_model_size(patcher)
+        _REGISTRY["models"][kind] = e
         _REGISTRY["loader_ts"] = _now()
     _attach_model_callbacks(patcher, kind)
     _hook_patches_models(patcher, kind)
+
+
+def _safe_model_size(patcher):
+    """模型权重规模（字节）。匹配失败时返回 None（不参与宽匹配）。"""
+    try:
+        return int(patcher.model_size())
+    except Exception:
+        return None
 
 
 def set_exec_state(on):
@@ -197,11 +211,12 @@ def _mark_used_for_patcher(patcher):
 def _same_model_family(e_patcher, patcher):
     """登记 patcher 与调用者 patcher 是否同一模型族。
 
-    三重匹配（由强到弱）：
+    四重匹配（由强到弱）：
     1. 同一实例；
     2. 底层 model 对象相同（clone/delegate 共享 self.model，get_clone_model_override 返回同一 model）；
-    3. parent 链回溯（官方 ModelPatcher.clone 总是 n.parent = self，含 force_deepcopy；
-       LoadedModel 内部也依赖 model.parent 跟踪 clone 关系，见 model_management.py:752）。
+    3. clone_base_uuid 相同（官方同源识别：ModelPatcher.clone 总是 n.clone_base_uuid = self.clone_base_uuid，
+       见 model_patcher.py:500；官方 unload_model_and_clones 也用其卸载整族，:2076）；
+    4. parent 链回溯（官方 ModelPatcher.clone 总是 n.parent = self）。
     """
     if e_patcher is None or patcher is None:
         return False
@@ -210,6 +225,10 @@ def _same_model_family(e_patcher, patcher):
     m1 = getattr(e_patcher, "model", None)
     m2 = getattr(patcher, "model", None)
     if m1 is not None and m1 is m2:
+        return True
+    u1 = getattr(e_patcher, "clone_base_uuid", None)
+    u2 = getattr(patcher, "clone_base_uuid", None)
+    if u1 is not None and u1 == u2:
         return True
     cur = getattr(patcher, "parent", None)
     seen = set()
@@ -221,24 +240,40 @@ def _same_model_family(e_patcher, patcher):
     return False
 
 
-def _in_currently_used(e_patcher):
-    """登记模型是否被官方标记「正在使用」（底层兜底信号，只读官方状态，零冲突）。
+def _in_currently_used(e_patcher, e=None):
+    """登记模型是否在官方 current_loaded_models 中（底层兜底信号，只读官方状态，零冲突）。
 
-    ComfyUI 的 load_models_gpu 对每个传入模型无条件置 LoadedModel.currently_used=True
-    （model_management.py:944），current_loaded_models 记录全部已加载模型（含 clone）。
-    因此即使 model_patches_models hook 因第三方插件替换而失效，只要模型真被
-    load_models_gpu 使用过，这里仍能匹配（不 miss）。粒度=执行周期（used 不清除）。
+    判据：**只要模型仍在 current_loaded_models 即视为被使用**（而非 currently_used 标志）——
+    低显存模式下官方 free_memory 会动态 offload（置 currently_used=False 但**不弹出列表**，
+    DynamicVRAM 分支 memory_to_free=0，model_management.py:884-888），此时模型仍被采样器
+    使用（计算时临时调显存），必须显示绿；开关彻底卸载（unload_model_and_clones →
+    free_memory pop，:2076/:894）后模型离开列表 → 自动转红。
+
+    匹配：先精确（同一实例 / BaseModel 相同 / clone_base_uuid 相同 / parent 链）；
+    再宽匹配（权重规模相同——TE-Speed 等深度处理节点会构造全新 patcher（新 uuid、新
+    BaseModel、无 parent 链），仅权重规模可关联；unet/clip/各 VAE 规模不同天然区分）。
+    e（登记条目）可提供身份字段，patcher=None（缓存命中/彻底卸载后）也能匹配。
     """
     try:
+        reg_uuid = e.get("clone_base_uuid") if e is not None else getattr(e_patcher, "clone_base_uuid", None)
+        reg_size = e.get("model_size") if e is not None else _safe_model_size(e_patcher)
         for loaded in model_management.current_loaded_models:
             lm = loaded.model
-            if lm is None or not loaded.currently_used:
+            if lm is None:
                 continue
-            if _same_model_family(e_patcher, lm):
+            if e_patcher is not None and _same_model_family(e_patcher, lm):
                 return True
+            if reg_uuid is not None and reg_uuid == getattr(lm, "clone_base_uuid", None):
+                return True
+            if reg_size is not None:
+                try:
+                    if reg_size == int(lm.model_size()):
+                        return True
+                except Exception:
+                    pass
+        return False
     except Exception:
-        pass
-    return False
+        return False
 
 
 def clear_busy():
@@ -620,11 +655,23 @@ def status_payload():
         executing = bool(_REGISTRY.get("executing"))
         for kind, e in _REGISTRY["models"].items():
             patcher = e.get("patcher")
-            if patcher is None:
+            if executing:
+                # 执行中：主信号（model_patches_models busy）+ 官方兜底（current_loaded_models）
+                # 匹配使用登记身份（uuid/权重规模），patcher=None（缓存命中未重新登记/
+                # 已彻底卸载）也能按身份匹配到「被当前执行加载使用」的模型族。
+                if patcher is None:
+                    busy = _in_currently_used(None, e)
+                else:
+                    busy = e.get("state") == "busy" or _in_currently_used(patcher, e)
+                if busy:
+                    st = "gpu"
+                else:
+                    pos = e.get("state")
+                    if pos not in ("gpu", "cpu", "free") or patcher is None:
+                        pos = residency(patcher) if patcher is not None else "free"
+                    st = "cpu" if pos != "free" else "free"
+            elif patcher is None:
                 st = "free"
-            elif executing:
-                busy = e.get("state") == "busy" or _in_currently_used(patcher)
-                st = "gpu" if busy else ("cpu" if residency(patcher) != "free" else "free")
             else:
                 # 位置：回调快照（ON_LOAD/ON_DETACH，clone 场景也准确）优先；无快照时实时计算
                 pos = e.get("state")
