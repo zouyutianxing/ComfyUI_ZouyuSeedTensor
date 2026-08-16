@@ -1563,7 +1563,7 @@ function setupModelLoaderNode(node) {
   if (origConfigure) {
     node.configure = function (info) {
       const r = origConfigure(info);
-      try { reattachLoaderLogic(node); } catch (e) { /* ignore */ }
+      try { node.__zouyuReattach && node.__zouyuReattach(); } catch (e) { /* ignore */ }
       return r;
     };
   }
