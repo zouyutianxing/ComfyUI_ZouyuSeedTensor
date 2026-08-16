@@ -1673,12 +1673,15 @@ function setupModelLoaderNode(node) {
     const orig = lowW.callback;
     lowW.callback = (v) => {
       if (orig) orig.call(lowW, v);
-      // 切换「低显存/CPU缓存」立即同步后端 switch，开关卸载信号即时使用最新模式
+      // 切换「低显存/CPU缓存」立即同步后端 switch，开关卸载信号即时使用最新模式；
+      // 切到低显存时后端会立即释放已登记的非显存模型（灯变红），这里马上拉取最新状态
       fetch("/zouyu_model_loader/set_switch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ on: !!v }),
-      }).catch(() => { /* 服务端未就绪时忽略 */ });
+      })
+        .then(() => refreshStatusDOM(node))
+        .catch(() => { /* 服务端未就绪时忽略 */ });
     };
   }
   // 精简显示开关：关闭（简洁）= 只保留下拉/灯/提示/端口/低显存/语言/本开关；打开（完整）= 显示文件夹按钮与导入条
@@ -1987,6 +1990,10 @@ api.addEventListener("executed", (event) => {
       refreshAllSwitchCombos();
     } else if (node.comfyClass === "ZouyuModelSwitch") {
       refreshSwitchModelCombo(node);
+      // 开关已发出加载/卸载信号（按低显存模式决定深度）→ 立即刷新所有加载器的状态灯
+      for (const ln of [...statusNodes]) {
+        if (ln.comfyClass === "ZouyuModelLoader") refreshStatusDOM(ln);
+      }
     }
   } catch (e) {
     /* ignore */

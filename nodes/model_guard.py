@@ -86,10 +86,26 @@ def log_event(msg):
         del _REGISTRY["events"][:-_MAX_EVENTS]
 
 
-def set_switch(on):
+def set_switch(on, eager=False):
+    """设置全局卸载策略开关（低显存=彻底卸载 / CPU缓存=官方管理）。
+
+    eager=True（前端手动切换）：切到低显存时，对已登记且不在显存的模型立即执行
+    彻底卸载（释放权重，灯变红），让用户马上看到开关效果；显存中的模型不动
+    （可能正在被使用）。eager=False（加载器 execute 同步）：不主动卸载，只登记策略。
+    """
     with _LOCK:
         _REGISTRY["switch"] = bool(on)
         _REGISTRY["switch_ts"] = _now()
+    if eager and on:
+        with _LOCK:
+            targets = [
+                kind for kind, e in _REGISTRY["models"].items()
+                if e.get("patcher") is not None and residency(e["patcher"]) != "gpu"
+            ]
+        for kind in targets:
+            e = _REGISTRY["models"].get(kind)
+            if e is not None:
+                _do_unload_model(e, e.get("name", kind), _slot_label(kind, True, e=e), True)
 
 
 def get_switch():
@@ -398,6 +414,13 @@ def _do_load_config(kind, cfg, name, label, zh):
         folder = cfg.get("folder", "")
         obj, actual, note = _load_slot_model(tkey, folder, cfg.get("name", ""))
         register(kind, cfg.get("name", ""), obj, model_type=actual, folder=folder, tkey=tkey)
+        # 加载后立即载入显存，状态灯变绿（否则显示「未加载」蓝灯，加载看起来无效）
+        try:
+            patcher = _patcher_of(obj)
+            if patcher is not None:
+                model_management.load_model_gpu(patcher)
+        except Exception:
+            pass
         return ("已加载 {} {}（{}）".format(label, name, note or "显存")
                 if zh else "loaded {} {} ({})".format(label, name, note or "VRAM"))
     except Exception as exc:
@@ -427,6 +450,11 @@ def _do_load_model(e, name, label, zh):
         folder = e.get("folder", "")
         obj, actual, _note = _load_slot_model(tkey, folder, e.get("name", ""))
         register(kind, e.get("name", ""), obj, model_type=actual, folder=folder, tkey=tkey)
+        # 重新加载后立即载入显存（与 _do_load_config 一致），状态灯变绿
+        try:
+            model_management.load_model_gpu(_patcher_of(obj))
+        except Exception:
+            pass
         return ("已重新加载 {}（{}）".format(label, _note)
                 if zh else "reloaded {} ({})".format(label, _note))
     except Exception as exc:
@@ -457,29 +485,41 @@ def _do_unload_to_ram(e, name, label, zh):
 
 
 def _do_unload_model(e, name, label, zh):
-    """彻底卸载（低显存模式）：从显存卸载到 CPU，DynamicVRAM 模型再释放 CPU 内存。"""
+    """彻底卸载（低显存模式）：从显存卸载到 CPU，并释放权重内存。
+
+    DynamicVRAM 模型由 partially_unload_ram 释放 CPU 权重；传统模型（非动态）
+    释放注册表对模型对象的引用，交由 GC 回收权重（模型已从官方缓存 unload_model_and_clones
+    移除，无其他持有者时真正释放内存）。状态显示红色「已卸载」。
+    重新加载时 patcher 为 None，会自动按登记文件重新加载。
+    """
     kind = e["kind"]
     patcher = e.get("patcher")
     if patcher is None:
-        return ("{} 无可用模型对象".format(label) if zh else "{} no model object".format(label))
+        return ("{} 已彻底卸载".format(label) if zh else "{} fully unloaded".format(label))
     freed = fully_unload_patcher(patcher)
     with _LOCK:
         cur = _REGISTRY["models"].get(kind)
         if cur is not None:
-            cur["state"] = residency(patcher)
+            # 释放对象引用：DynamicVRAM 权重已释放；传统模型权重随对象回收。
+            # 同时移出 watched 观测表，避免其持有引用阻止 GC 回收权重。
+            _REGISTRY["watched"].pop(id(patcher), None)
+            cur["obj"] = None
+            cur["patcher"] = None
+            cur["state"] = "free"
             cur["ts"] = _now()
     if freed > 0:
         return ("已彻底卸载 {}（显存+CPU内存）".format(label)
                 if zh else "fully unloaded {} (VRAM+RAM)".format(label))
-    return ("已卸载 {}（显存→CPU内存，传统模型无法释放内存）".format(label)
-            if zh else "unloaded {} (VRAM→RAM, legacy model keeps RAM)".format(label))
+    return ("已彻底卸载 {}（显存与CPU权重已释放）".format(label)
+            if zh else "fully unloaded {} (VRAM+weights released)".format(label))
 
 
 def status_payload():
     with _LOCK:
         models = []
         for kind, e in _REGISTRY["models"].items():
-            st = residency(e["patcher"])
+            # 低显存彻底卸载后对象引用已释放（patcher=None）→ 显示红色「已卸载」
+            st = "free" if e.get("patcher") is None else residency(e["patcher"])
             info = STATE_INFO.get(st, STATE_INFO["unknown"])
             mtype = e.get("model_type", "")
             tinfo = MODEL_TYPE_INFO.get(mtype, MODEL_TYPE_INFO["unknown"]) if mtype else None
@@ -970,10 +1010,12 @@ def register_routes():
     @routes.post("/zouyu_model_loader/set_switch")
     async def _set_switch(request):
         """前端切换加载器的「低显存/CPU缓存」开关时同步后端 switch，
-        使开关节点卸载信号立即使用最新模式（不必等加载器重新执行）。"""
+        使开关节点卸载信号立即使用最新模式（不必等加载器重新执行）。
+        切到低显存时立即释放已登记的非显存模型（灯变红），让开关效果即时可见。"""
         try:
             data = await request.json()
-            set_switch(bool(data.get("on", False)))
+            on = bool(data.get("on", False))
+            set_switch(on, eager=True)
             return web.json_response({"ok": True, "switch": get_switch()})
         except Exception as exc:
             return web.json_response({"ok": False, "error": str(exc)[:200]}, status=400)
