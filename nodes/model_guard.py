@@ -967,6 +967,17 @@ def register_routes():
         except Exception as exc:
             return web.json_response({"ok": False, "error": str(exc)[:200]}, status=400)
 
+    @routes.post("/zouyu_model_loader/set_switch")
+    async def _set_switch(request):
+        """前端切换加载器的「低显存/CPU缓存」开关时同步后端 switch，
+        使开关节点卸载信号立即使用最新模式（不必等加载器重新执行）。"""
+        try:
+            data = await request.json()
+            set_switch(bool(data.get("on", False)))
+            return web.json_response({"ok": True, "switch": get_switch()})
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)[:200]}, status=400)
+
 
 # ---------------------------------------------------------------------------
 # 节点2：模型加载开关（导线式信号检测 → 加载/卸载任务）

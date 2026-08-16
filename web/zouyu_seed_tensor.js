@@ -1623,6 +1623,13 @@ function setupModelLoaderNode(node) {
     applySlotVisibility(node);
     pushLoaderConfig(node);
     refreshAllSwitchCombos();
+    // 同步「低显存/CPU缓存」模式到后端（configure 恢复开关值后，开关卸载信号立即使用最新模式）
+    const lowVal = !!node.widgets?.find((w) => w.name === "low_vram_mode")?.value;
+    fetch("/zouyu_model_loader/set_switch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ on: lowVal }),
+    }).catch(() => { /* 服务端未就绪时忽略 */ });
   }
   node.__zouyuReattach = reattach;
 
@@ -1634,7 +1641,15 @@ function setupModelLoaderNode(node) {
   const lowW = node.widgets.find((w) => w.name === "low_vram_mode");
   if (lowW) {
     const orig = lowW.callback;
-    lowW.callback = (v) => { if (orig) orig.call(lowW, v); };
+    lowW.callback = (v) => {
+      if (orig) orig.call(lowW, v);
+      // 切换「低显存/CPU缓存」立即同步后端 switch，开关卸载信号即时使用最新模式
+      fetch("/zouyu_model_loader/set_switch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ on: !!v }),
+      }).catch(() => { /* 服务端未就绪时忽略 */ });
+    };
   }
   // 精简显示开关：关闭（简洁）= 只保留下拉/灯/提示/端口/低显存/语言/本开关；打开（完整）= 显示文件夹按钮与导入条
   const cvW = node.widgets.find((w) => w.name === "compact_view");
