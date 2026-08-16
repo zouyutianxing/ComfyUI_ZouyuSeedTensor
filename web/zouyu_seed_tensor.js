@@ -684,50 +684,98 @@ function slotWidgets(node, i) {
   };
 }
 
+// ===========================================================================
+// 状态读取（重构：以 widget 控件值为唯一状态源，不做副本同步，彻底消除状态漂移）
+// ===========================================================================
+
+/** 槽位类型（归一化：旧版分类名 → 有效类型；未知 → 「其他」自动识别；「未使用」保留）。 */
+function slotTypeOf(node, i) {
+  const tv = node.widgets?.find((w) => w.name === `model_${i}_type`)?.value;
+  return normalizeType(tv || "未使用");
+}
+
+/** 槽位文件夹（相对 models 根，空 = 默认分类/全量）。 */
+function slotFolderOf(node, i) {
+  return node.widgets?.find((w) => w.name === `model_${i}_folder`)?.value || "";
+}
+
+/** 槽位已选模型文件名（未选返回空串）。 */
+function slotNameOf(node, i) {
+  const v = node.widgets?.find((w) => w.name === `model_${i}_name`)?.value;
+  return v && v !== "(未选择)" && v !== "(无文件)" ? v : "";
+}
+
+/** 槽位是否已配置（类型非「未使用」且已选模型）。 */
+function slotFilled(node, i) {
+  return slotTypeOf(node, i) !== "未使用" && !!slotNameOf(node, i);
+}
+
+function anySlotFilled(node) {
+  for (let i = 0; i < MAX_MODELS; i++) {
+    if (slotFilled(node, i)) return true;
+  }
+  return false;
+}
+
+/** 归一化所有槽位的类型控件值（旧分类名 → 有效类型），确保提交校验通过。 */
+function normalizeTypeWidgets(node) {
+  for (let i = 0; i < MAX_MODELS; i++) {
+    const tw = node.widgets?.find((w) => w.name === `model_${i}_type`);
+    if (!tw) continue;
+    const nv = normalizeType(tw.value);
+    if (nv !== tw.value) tw.value = nv;
+  }
+}
+
+function compactViewOn(node) {
+  return !!node.widgets?.find((w) => w.name === "compact_view")?.value;
+}
+
 /** 可见槽位数：0..最后已填槽位+1（选好模型后自动弹出下一个，最多 8 个）。
  *  「已填」= 已选模型文件 且 槽位类型不是「未使用」（旧工作流残留值不算，防止全部显示）。 */
-function visibleSlotCount(st) {
+function visibleSlotCount(node) {
   let lastFilled = -1;
   for (let i = 0; i < MAX_MODELS; i++) {
-    const s = st.slots[i];
-    if (!s) continue;
-    const filled = !!s.name && s.name !== "(未选择)" && s.name !== "(无文件)" && s.type !== "未使用";
-    if (filled) lastFilled = i;
+    if (slotFilled(node, i)) lastFilled = i;
   }
   return Math.min(Math.max(lastFilled + 2, 1), MAX_MODELS);
 }
 
 /** 刷新某槽位文件下拉选项：未选文件夹时显示全部模型（请加载模型），选了文件夹按文件夹过滤。 */
 async function refreshSlotFileOptions(node, i) {
-  const st = node.__zouyuSlotState;
-  const s = st && st.slots[i];
   const w = slotWidgets(node, i).name;
-  if (!w || !s) return;
-  if (!s.type || s.type === "未使用") {
+  if (!w) return;
+  const st = node.__zouyuSlotState;
+  const t = slotTypeOf(node, i);
+  if (t === "未使用") {
     w.options = w.options || {};
     w.options.values = ["(未选择)"];
     w.value = "(未选择)";
     return;
   }
   // 未选文件夹 → 全量模型列表；已选文件夹 → 该文件夹下的模型文件
-  const category = s.folder ? (TYPE_CATEGORY[s.type] || "diffusion_models") : "all";
-  const folder = s.folder || ".";
+  const folder = slotFolderOf(node, i);
+  const category = folder ? (TYPE_CATEGORY[t] || "diffusion_models") : "all";
+  const f = folder || ".";
   try {
     const d = await fetchJson(
-      `/zouyu_model_loader/files?category=${encodeURIComponent(category)}&folder=${encodeURIComponent(folder)}`
+      `/zouyu_model_loader/files?category=${encodeURIComponent(category)}&folder=${encodeURIComponent(f)}`
     );
-    s.files = (d.files || []).length ? d.files : [];
+    const files = (d.files || []).length ? d.files : [];
+    if (st) st.files = st.files || {};
+    if (st) st.files[i] = files;
     w.options = w.options || {};
     // 选项始终包含「(未选择)」占位符与当前已选值，避免下拉值不在选项中
     // 而被框架重置或前端校验报「输入值不可用」
-    w.options.values = ["(未选择)", ...(s.files.length ? s.files : [])];
-    if (s.name && s.name !== "(未选择)" && s.name !== "(无文件)" && !s.files.includes(s.name)) {
-      w.options.values.push(s.name);
+    w.options.values = ["(未选择)", ...files];
+    const cur = slotNameOf(node, i);
+    if (cur && !files.includes(cur)) {
+      w.options.values.push(cur);
     }
     // 未选择（占位符）保持不动，避免把下拉自动填成第一个文件；
     // 只有当前值已失效时才回退到第一个可用文件
-    if (w.value !== "(未选择)" && w.value !== "(无文件)" && !s.files.includes(w.value)) {
-      w.value = s.files[0] || "(未选择)";
+    if (w.value !== "(未选择)" && w.value !== "(无文件)" && !files.includes(w.value)) {
+      w.value = files[0] || "(未选择)";
     }
   } catch (e) {
     w.options.values = ["(未选择)"];
@@ -765,9 +813,7 @@ function measureRowHeight(node) {
 
 /** 槽位 i 的名字控件在可见控件网格中的行序号（type/folder 已隐藏，每槽位仅 1 个控件行）。 */
 function visibleRowIndex(node, i) {
-  const st = node.__zouyuSlotState;
-  if (!st) return i;
-  const count = visibleSlotCount(st);
+  const count = visibleSlotCount(node);
   let idx = 0;
   for (let j = 0; j < i; j++) {
     if (j < count) idx += 1;
@@ -793,9 +839,7 @@ function updateRowTail(node, overlay, i, rowCY, visible, zh) {
   }
   tail.style.top = (rowCY != null ? rowCY : 12) + "px";
   tail.innerHTML = "";
-  const st2 = node.__zouyuSlotState;
-  const s = st2 && st2.slots[i];
-  const filled = !!(s && s.name && s.name !== "(未选择)" && s.name !== "(无文件)" && s.type !== "未使用");
+  const filled = slotFilled(node, i);
   const info = node.__zouyuStatus && node.__zouyuStatus[`slot${i}`];
   const stInfo = filled ? (STATE_INFO[(info && info.state) || "unknown"] || STATE_INFO.unknown) : null;
   const light = document.createElement("span");
@@ -812,18 +856,12 @@ function updateRowTail(node, overlay, i, rowCY, visible, zh) {
   if (node.__zouyuStatus) node.__zouyuStatus[`slot${i}`] = { el: light, textEl, tag: null, dotOnly: true };
 }
 
-/** Vue 模式：槽位行下的按钮行（📁 模型文件夹 + ⤓加载/⤒卸载）。旧版 Canvas 模式用真实按钮控件。 */
+/** Vue 模式：槽位行下的按钮行（📁 模型文件夹）。旧版 Canvas 模式用真实按钮控件。 */
 function updateRowButtons(node, overlay, i, rowCY, visible, zh) {
-  const st = node.__zouyuSlotState;
-  const s = st && st.slots[i];
-  const filled = !!(s && s.name && s.name !== "(未选择)" && s.name !== "(无文件)" && s.type !== "未使用");
+  const filled = slotFilled(node, i);
   // 至少选过一个模型、且精简显示开关打开时，所有可见下拉都显示按钮（与 applySlotVisibility 一致）
-  let anyFilled = false;
-  for (let j = 0; j < MAX_MODELS; j++) {
-    const sj = st && st.slots[j];
-    if (sj && sj.name && sj.name !== "(未选择)" && sj.name !== "(无文件)" && sj.type !== "未使用") { anyFilled = true; break; }
-  }
-  const showBtn = visible && (filled || anyFilled) && !!st.compactView;
+  const anyFilled = anySlotFilled(node);
+  const showBtn = visible && (filled || anyFilled) && compactViewOn(node);
   let bar = overlay.querySelector(`[data-zouyu-btns="${i}"]`);
   if (!showBtn) {
     if (bar) bar.remove();
@@ -849,8 +887,7 @@ function updateRowButtons(node, overlay, i, rowCY, visible, zh) {
 /** 布局一次：端口点平移到下拉行 + 行尾灯/文字/标签 定位（节点 DOM 内，自动跟随节点）。 */
 function layoutLoaderOverlay(node) {
   const el = nodeEl(node);
-  const st = node.__zouyuSlotState;
-  if (!el || !st) return;
+  if (!el) return;
   el.classList.add("zouyu-loader-node");
   let overlay = el.querySelector(".zouyu-loader-overlay");
   if (!overlay) {
@@ -870,8 +907,8 @@ function layoutLoaderOverlay(node) {
     bar.addEventListener("drop", (e) => { e.preventDefault(); bar.classList.remove("dragover"); });
   }
   const nodeRect = el.getBoundingClientRect();
-  const count = visibleSlotCount(st);
-  const zh = st.lang !== "English";
+  const count = visibleSlotCount(node);
+  const zh = node.__zouyuLang !== "English";
   const rowH = measureRowHeight(node);
   for (let i = 0; i < MAX_MODELS; i++) {
     const visible = i < count;
@@ -914,14 +951,14 @@ function layoutLoaderOverlay(node) {
   }
   // 精简显示开关：关闭（简洁）时隐藏底部导入条
   const ib = overlay.querySelector(".zouyu-import-bar");
-  if (ib) ib.style.display = st.compactView ? "" : "none";
-  if (node.__zouyuLang !== st.lang) {
+  if (ib) ib.style.display = compactViewOn(node) ? "" : "none";
+  if (node.__zouyuLang !== node.widgets?.find((w) => w.name === "language")?.value) {
     const bar = overlay.querySelector(".zouyu-import-bar");
     if (bar) {
       bar.dataset.text = zhText(node, "📥 拖入文件夹导入模型（或点击选择）", "📥 Drop folder to import models (or click)");
       bar.textContent = bar.dataset.text;
     }
-    node.__zouyuLang = st.lang;
+    node.__zouyuLang = node.widgets?.find((w) => w.name === "language")?.value;
   }
 }
 
@@ -1015,20 +1052,21 @@ async function importFolderEntries(node, folderName, files) {
     if (!r.ok || !d.ok) { showImportResult(node, (d.error || r.statusText || "导入失败"), true); return; }
     showImportResult(node, zhText(node, `已导入 ${d.count} 个文件 → models/${d.target}`, `Imported ${d.count} files → models/${d.target}`), false);
     // 刷新各槽位下拉选项
-    const st = node.__zouyuSlotState;
     for (let i = 0; i < MAX_MODELS; i++) {
-      const s = st && st.slots[i];
-      if (s && s.type && s.type !== "未使用") await refreshSlotFileOptions(node, i);
+      if (slotTypeOf(node, i) !== "未使用") await refreshSlotFileOptions(node, i);
     }
     // 第一个可见空槽位的文件夹指向导入目标
-    for (let i = 0; i < visibleSlotCount(st); i++) {
-      const s = st.slots[i];
-      if (s && s.type && s.type !== "未使用" && (!s.folder || s.folder === TYPE_CATEGORY[s.type])) {
-        s.folder = d.target;
+    const visCnt = visibleSlotCount(node);
+    for (let i = 0; i < visCnt; i++) {
+      const t = slotTypeOf(node, i);
+      if (t !== "未使用") {
         const fw = slotWidgets(node, i).folder;
-        if (fw) fw.value = d.target;
-        await refreshSlotFileOptions(node, i);
-        break;
+        const cur = fw ? fw.value : "";
+        if (!cur || cur === TYPE_CATEGORY[t]) {
+          if (fw) fw.value = d.target;
+          await refreshSlotFileOptions(node, i);
+          break;
+        }
       }
     }
   } catch (err) {
@@ -1114,33 +1152,6 @@ function isVueMode() {
   return typeof LiteGraph !== "undefined" && !!LiteGraph.vueNodesMode;
 }
 
-/** 把当前控件值同步回状态（工作流加载/配置后控件值才恢复，需要重新读取）。 */
-function syncStateFromWidgets(node) {
-  const st = node.__zouyuSlotState;
-  if (!st) return;
-  for (let i = 0; i < MAX_MODELS; i++) {
-    const w = slotWidgets(node, i);
-    // 类型：「未使用」=空槽位（即使 name 有残留值也不显示/不加载，兼容旧工作流）；
-    // 其它明确类型或「其他」（自动识别）视为已启用；旧工作流中用户明确选过类型则尊重
-    const tv = w.type?.value;
-    // 类型归一化：「未使用」保留；旧版工作流分类名（diffusion_models/text_encoders/vae 等）映射为有效类型；
-    // 未知值 → 「其他」（自动识别）
-    st.slots[i].type = (tv === "未使用") ? "未使用" : normalizeType(tv);
-    st.slots[i].folder = w.folder?.value || "";
-    st.slots[i].name = w.name?.value || "(未选择)";
-    // 「未使用」槽位强制清空残留 name（旧工作流曾被自动填充的模型名），
-    // 确保这类槽位既不显示也不参与加载
-    if (st.slots[i].type === "未使用") {
-      st.slots[i].name = "(未选择)";
-      st.slots[i].folder = "";
-      if (w.name && w.name.value !== "(未选择)") w.name.value = "(未选择)";
-    }
-  }
-  st.lowVram = !!node.widgets?.find((w) => w.name === "low_vram_mode")?.value;
-  st.compactView = !!node.widgets?.find((w) => w.name === "compact_view")?.value;
-  st.lang = node.widgets?.find((w) => w.name === "language")?.value || getLang();
-}
-
 /** 布局分派：Vue 节点模式用 DOM 叠加层；旧版 Canvas 模式（默认）用 output.pos + 画布绘制。 */
 function applyLoaderLayout(node) {
   if (isVueMode()) {
@@ -1167,10 +1178,8 @@ function applyLoaderLayout(node) {
 
 /** 旧版布局：端口对齐各行 + 行数变化时自动伸缩节点。 */
 function layoutLegacyLoader(node) {
-  const st = node.__zouyuSlotState;
-  if (!st) return;
   try { node.arrange(); } catch (e) { /* 忽略 */ }
-  const count = visibleSlotCount(st);
+  const count = visibleSlotCount(node);
   const H = LiteGraph.NODE_WIDGET_HEIGHT;
   // 下拉控件宽度收窄，行尾留出空间给 状态文字+三色灯+端口名（避免重叠）
   const namePad = 150;
@@ -1181,10 +1190,8 @@ function layoutLegacyLoader(node) {
   for (let i = 0; i < MAX_MODELS; i++) {
     const out = node.outputs && node.outputs[i];
     if (!out) continue;
-    const s = st.slots[i];
     // 仅已选模型的槽位显示端口（与 syncLoaderOutputs 一致）
-    const used = i < count && !!s && s.type !== "未使用" && !!s.name
-      && s.name !== "(未选择)" && s.name !== "(无文件)";
+    const used = i < count && slotFilled(node, i);
     if (used) {
       const nameW = slotWidgets(node, i).name;
       const rowY = slotRowCenterY(nameW, H); // 端口与下拉同一水平线（行中心）
@@ -1213,24 +1220,22 @@ function slotRowCenterY(nameW, H) {
 }
 
 /** 画布绘制：行尾 = 三色状态灯 + 状态文字（与下拉同一水平线）。
- *  布局：下拉 → 状态文字（右对齐 W-80）→ 灯（W-66）→ 端口名（W-56 起，类型+序号）→ 端口点（W-8）。
+ *  布局：下拉 → 状态文字（右对齐 W-86）→ 灯（W-70）→ 端口名（类型+序号）→ 端口点（W-8）。
  *  每个可见下拉行都绘制灯：未选模型=灰色「未选择」，已选模型=按状态三色。 */
 function drawLegacyOverlay(node, ctx) {
-  const st = node.__zouyuSlotState;
-  if (!st || !ctx) return;
-  const zh = st.lang !== "English";
-  const count = visibleSlotCount(st);
+  if (!ctx) return;
+  const zh = node.__zouyuLang !== "English";
+  const count = visibleSlotCount(node);
   const H = LiteGraph.NODE_WIDGET_HEIGHT;
   const W = node.size[0];
   ctx.save();
   ctx.textBaseline = "middle";
   for (let i = 0; i < MAX_MODELS; i++) {
     if (i >= count) break;
-    const s = st.slots[i];
-    if (!s) continue;
     const nameW = slotWidgets(node, i).name;
+    if (!nameW) continue;
     const y = slotRowCenterY(nameW, H);
-    const filled = !!s.name && s.name !== "(未选择)" && s.name !== "(无文件)" && s.type !== "未使用";
+    const filled = slotFilled(node, i);
     const info = node.__zouyuStatus && node.__zouyuStatus[`slot${i}`];
     let color, text;
     if (!filled) {
@@ -1308,35 +1313,22 @@ function setupLegacyLoaderLayout(node) {
   }, 60);
 }
 
-/** 按当前状态应用控件显隐 + 行布局 + 端口对齐（自动分派 Vue/旧版Canvas 两种布局）。 */
+/** 按当前状态应用控件显隐 + 行布局 + 端口对齐（自动分派 Vue/旧版Canvas 两种布局）。
+ *  状态唯一来源 = widget 控件值（重构后不再维护 slots 副本）。 */
 function applySlotVisibility(node) {
-  const st = node.__zouyuSlotState;
-  if (!st) return;
-  const count = visibleSlotCount(st);
-  // 是否已选过至少一个模型：选过之后，所有可见下拉（含新出现的空下拉）都显示下方的文件夹/加载按钮
-  let anyFilled = false;
-  for (let j = 0; j < MAX_MODELS; j++) {
-    const sj = st.slots[j];
-    if (sj && sj.name && sj.name !== "(未选择)" && sj.name !== "(无文件)" && sj.type !== "未使用") { anyFilled = true; break; }
-  }
-  // 精简显示开关：关闭（简洁）= 隐藏文件夹/加载按钮与导入条，只保留下拉/灯/提示/端口/低显存/语言/本开关
-  const showActions = !!st.compactView;
+  normalizeTypeWidgets(node);
+  const count = visibleSlotCount(node);
+  const anyFilled = anySlotFilled(node);
+  // 精简显示开关：关闭（简洁）= 隐藏文件夹按钮与导入条，只保留下拉/灯/提示/端口/低显存/语言/本开关
+  const showActions = compactViewOn(node);
   for (let i = 0; i < MAX_MODELS; i++) {
     const w = slotWidgets(node, i);
     const visible = i < count;
-    const s = st.slots[i] || (st.slots[i] = { type: "其他", folder: "", name: "(未选择)", files: [] });
-    // 「未使用」槽位：已选模型 → 自动启用为「其他」（自动识别），防止配置被清空丢失；
-    // 未选模型 → 保持空（清掉旧工作流自动填充的残留文件名）
-    if (s.type === "未使用") {
-      if (s.name && s.name !== "(未选择)" && s.name !== "(无文件)") {
-        s.type = "其他";
-        if (w.type) w.type.value = "其他";
-      } else {
-        s.name = "(未选择)";
-        if (w.name && w.name.value !== "(未选择)") w.name.value = "(未选择)";
-      }
+    const filled = slotFilled(node, i);
+    // 「未使用」槽位显示为下一个空位时：清空残留 name（旧工作流自动填充的模型名）
+    if (slotTypeOf(node, i) === "未使用" && w.name && w.name.value !== "(未选择)" && w.name.value !== "(无文件)") {
+      w.name.value = "(未选择)";
     }
-    const filled = !!s.name && s.name !== "(未选择)" && s.name !== "(无文件)" && s.type !== "未使用";
     // 简洁模式：类型/文件夹控件隐藏（类型自动识别、文件夹用行下按钮），只显示「请加载模型」文件下拉
     setWidgetHidden(w.type, true);
     setWidgetHidden(w.folder, true);
@@ -1345,9 +1337,6 @@ function applySlotVisibility(node) {
     const showBtn = visible && (filled || anyFilled) && showActions;
     const folderBtn = node.widgets?.find((x) => x.__zouyuSlotBtn === `folder_${i}`);
     if (folderBtn) setWidgetHidden(folderBtn, !showBtn);
-    if (w.type && w.type.value !== s.type) w.type.value = s.type;
-    if (w.folder && w.folder.value !== s.folder) w.folder.value = s.folder;
-    if (w.name && w.name.value !== s.name) w.name.value = s.name;
   }
   // 集成模式开关不再需要（简洁模式为默认且唯一），隐藏
   const compactW = node.widgets?.find((w) => w.name === "compact_mode");
@@ -1382,22 +1371,19 @@ function fitNodeHeight(node) {
   } catch (e) { /* ignore */ }
 }
 
-/** 输出端口与模型一一对应：按类型编号命名（主模型0 (Diffusion)/文本模型0 (CLIP)/...），端口文字显示类型+分类。 */
+/** 输出端口与模型一一对应：按类型编号命名（主模型0/文本模型0/...）。 */
 function syncLoaderOutputs(node) {
-  const st = node.__zouyuSlotState;
-  if (!st) return;
-  const zh = st.lang !== "English";
+  const zh = node.__zouyuLang !== "English";
   const ordinals = {};
   for (let i = 0; i < MAX_MODELS; i++) {
-    const s = st.slots[i];
     if (!node.outputs[i]) continue;
-    const used = s && s.type && s.type !== "未使用" && s.name && s.name !== "(未选择)";
+    const used = slotFilled(node, i);
     if (!used) {
       node.outputs[i].name = "";
       node.outputs[i].label = "";
       continue;
     }
-    const tkey = TYPE_KEYS[s.type] || "other";
+    const tkey = TYPE_KEYS[slotTypeOf(node, i)] || "other";
     ordinals[tkey] = (ordinals[tkey] || 0) + 1;
     node.outputs[i].name = makePortName(zh, TYPE_DISPLAY[tkey] || TYPE_DISPLAY.other, ordinals[tkey] - 1);
     node.outputs[i].label = "";
@@ -1408,9 +1394,7 @@ function syncLoaderOutputs(node) {
 
 /** 设置各槽位控件的标签（简洁模式：只显示「请加载模型」文件下拉）。 */
 function applyLoaderLabels(node) {
-  const st = node.__zouyuSlotState;
-  if (!st) return;
-  const zh = st.lang !== "English";
+  const zh = node.__zouyuLang !== "English";
   for (let i = 0; i < MAX_MODELS; i++) {
     const w = slotWidgets(node, i);
     if (w.name) w.label = zh ? `请加载模型 ${i + 1}` : `Load model ${i + 1}`;
@@ -1425,9 +1409,7 @@ function applyLoaderLabels(node) {
 let _folderBrowser = null;
 
 function openFolderBrowser(node, slotIndex) {
-  const st = node.__zouyuSlotState;
-  const s = st && st.slots[slotIndex];
-  if (!s) return;
+  if (!node.__zouyuSlotState) return;
   if (!_folderBrowser) _folderBrowser = createFolderBrowser();
   _folderBrowser.open(node, slotIndex);
 }
@@ -1528,11 +1510,8 @@ function createFolderBrowser() {
   overlay.querySelector(".zouyu-fb-close").addEventListener("click", close);
   overlay.querySelector(".zouyu-fb-cancel").addEventListener("click", close);
   overlay.querySelector(".zouyu-fb-ok").addEventListener("click", () => {
-    const s = state.node && state.node.__zouyuSlotState && state.node.__zouyuSlotState.slots[state.slot];
-    if (!s) return;
-    s.folder = state.path || "";
     const fw = slotWidgets(state.node, state.slot).folder;
-    if (fw) fw.value = s.folder;
+    if (fw) fw.value = state.path || "";
     refreshSlotFileOptions(state.node, state.slot);
     close();
   });
@@ -1550,8 +1529,8 @@ function createFolderBrowser() {
     open(node, slot) {
       state.node = node;
       state.slot = slot;
-      const s = node.__zouyuSlotState && node.__zouyuSlotState.slots[slot];
-      state.path = (s && s.folder) || "";
+      const fw = slotWidgets(node, slot).folder;
+      state.path = (fw && fw.value) || "";
       setLang();
       overlay.classList.remove("hidden");
       navigate(state.path);
@@ -1559,78 +1538,50 @@ function createFolderBrowser() {
   };
 }
 
-function removeSlot(node, i) {
-  const st = node.__zouyuSlotState;
-  for (let j = i; j < MAX_MODELS - 1; j++) {
-    st.slots[j] = st.slots[j + 1] || { type: "未使用", folder: "", name: "(未选择)", files: [] };
-  }
-  st.slots[MAX_MODELS - 1] = { type: "未使用", folder: "", name: "(未选择)", files: [] };
-  applySlotVisibility(node);
-  refreshStatusDOM(node);
-}
-
 function setupModelLoaderNode(node) {
   ensureLoaderOverlayStyle();
 
-  // 从 schema 原生控件读取状态（新节点所有槽位默认「其他」= 自动识别，保证下拉有模型选项）
-  const st = { lowVram: false, lang: getLang(), slots: {} };
-  for (let i = 0; i < MAX_MODELS; i++) {
-    const w = slotWidgets(node, i);
-    const tv = w.type?.value;
-    st.slots[i] = {
-      // 新节点：「未使用」（schema 默认）→「其他」自动识别；其它值归一化（含旧版分类名映射）
-      type: (tv === "未使用") ? "其他" : normalizeType(tv),
-      folder: w.folder?.value || "",
-      name: w.name?.value || "(未选择)",
-      files: [],
-    };
-  }
-  st.lowVram = !!node.widgets?.find((w) => w.name === "low_vram_mode")?.value;
-  st.compactView = !!node.widgets?.find((w) => w.name === "compact_view")?.value;
-  st.lang = node.widgets?.find((w) => w.name === "language")?.value || getLang();
-  node.__zouyuSlotState = st;
-  node.__zouyuLang = st.lang;
+  // 重构：widget 控件值 = 唯一状态源（不再维护 slots 副本，杜绝状态漂移/配置丢失）。
+  // __zouyuSlotState 仅保存文件选项缓存与语言等辅助信息。
+  node.__zouyuSlotState = { files: {} };
+  node.__zouyuLang = getLang();
   node.__zouyuStatus = {};
-  // 加入 2.5s 状态轮询：开关节点卸载/加载后，无需加载器重跑即可刷新灯与文字
   statusNodes.add(node);
   startStatusPolling();
 
-  // 挂接回调（包装原有回调，保证值仍然流向后端）
+  // 配置变化 → 推送给后端（register_config 完成后），再刷新图中所有开关的下拉（避免竞态）
   const configDirty = () => {
-    // 配置变化 → 先推送给后端（register_config 完成后），再刷新图中所有开关的下拉（避免竞态）
     Promise.resolve(pushLoaderConfig(node)).then(() => refreshAllSwitchCombos());
   };
+
+  // 所有槽位初始归一化：旧分类名 → 有效类型
+  normalizeTypeWidgets(node);
+  // 新节点：schema 默认「未使用」→「其他」（自动识别），保证每个下拉都有完整模型选项；
+  // 旧工作流加载走 onAfterGraphConfigured，那里的空槽位保留「未使用」以清理残留
+  for (let i = 0; i < MAX_MODELS; i++) {
+    const tw = slotWidgets(node, i).type;
+    if (tw && tw.value === "未使用") tw.value = "其他";
+  }
+
   for (let i = 0; i < MAX_MODELS; i++) {
     const w = slotWidgets(node, i);
-    if (!w.type) continue;
-    const s = st.slots[i];
-    const origTypeCb = w.type.callback;
-    w.type.callback = (v) => {
-      if (origTypeCb) origTypeCb.call(w.type, v);
-      s.type = v;
-      if (v !== "未使用") {
-        s.folder = TYPE_CATEGORY[v] || "";
-        if (w.folder) w.folder.value = s.folder;
-        // 仅当尚未选模型时才清空；已选模型保持不变（防止框架触发 type 回调时配置丢失）
-        if (!s.name || s.name === "(未选择)" || s.name === "(无文件)") {
-          s.name = "(未选择)";
-          if (w.name) w.name.value = "(未选择)";
-        }
-        refreshSlotFileOptions(node, i);
-      }
-      applySlotVisibility(node);
-      configDirty();
-    };
+    if (w.type) {
+      const origTypeCb = w.type.callback;
+      w.type.callback = (v) => {
+        const nv = normalizeType(v);
+        if (nv !== v) w.type.value = nv;
+        if (origTypeCb) origTypeCb.call(w.type, nv);
+        applySlotVisibility(node);
+        configDirty();
+      };
+    }
     if (w.name) {
       const origNameCb = w.name.callback;
       w.name.callback = (v) => {
         if (origNameCb) origNameCb.call(w.name, v);
-        s.name = v;
-        // 用户在「未使用」槽位选模型 → 自动启用该槽位（类型改为「其他」= 自动识别），
-        // 避免配置被当作「未使用」清空丢失
-        if (s.type === "未使用" && v && v !== "(未选择)" && v !== "(无文件)") {
-          s.type = "其他";
-          if (w.type) w.type.value = "其他";
+        // 用户在「未使用」槽位选模型 → 自动启用（类型改为「其他」= 自动识别）
+        if (slotTypeOf(node, i) === "未使用" && v && v !== "(未选择)" && v !== "(无文件)" && w.type) {
+          w.type.value = "其他";
         }
         applySlotVisibility(node);
         // 预刷新下一个下拉的模型选项（选好当前模型后，新出现的下拉立即可选）
@@ -1644,7 +1595,6 @@ function setupModelLoaderNode(node) {
       const origFolderCb = w.folder.callback;
       w.folder.callback = (v) => {
         if (origFolderCb) origFolderCb.call(w.folder, v);
-        s.folder = v;
         refreshSlotFileOptions(node, i);
         configDirty();
       };
@@ -1653,20 +1603,19 @@ function setupModelLoaderNode(node) {
   const compactW = node.widgets.find((w) => w.name === "compact_mode");
   if (compactW) {
     const orig = compactW.callback;
-    compactW.callback = (v) => { if (orig) orig.call(compactW, v); st.compact = !!v; applySlotVisibility(node); };
+    compactW.callback = (v) => { if (orig) orig.call(compactW, v); applySlotVisibility(node); };
   }
   const lowW = node.widgets.find((w) => w.name === "low_vram_mode");
   if (lowW) {
     const orig = lowW.callback;
-    lowW.callback = (v) => { if (orig) orig.call(lowW, v); st.lowVram = !!v; };
+    lowW.callback = (v) => { if (orig) orig.call(lowW, v); };
   }
-  // 精简显示开关：关闭（简洁）= 只保留下拉/灯/提示/端口/低显存/语言/本开关；打开（完整）= 显示文件夹/加载按钮与导入条
+  // 精简显示开关：关闭（简洁）= 只保留下拉/灯/提示/端口/低显存/语言/本开关；打开（完整）= 显示文件夹按钮与导入条
   const cvW = node.widgets.find((w) => w.name === "compact_view");
   if (cvW) {
     const orig = cvW.callback;
     cvW.callback = (v) => {
       if (orig) orig.call(cvW, v);
-      st.compactView = !!v;
       applySlotVisibility(node);
     };
   }
@@ -1675,7 +1624,6 @@ function setupModelLoaderNode(node) {
     const orig = langW.callback;
     langW.callback = (v) => {
       if (orig) orig.call(langW, v);
-      st.lang = v;
       setLang(v);
       node.__zouyuLang = v;
       applyLoaderLabels(node);
@@ -1687,21 +1635,19 @@ function setupModelLoaderNode(node) {
   applyLoaderLabels(node);
   applySlotVisibility(node);
   // 只刷新可见槽位的文件下拉（避免多余请求）
-  const visCnt = visibleSlotCount(st);
+  const visCnt = visibleSlotCount(node);
   for (let i = 0; i < visCnt; i++) {
-    const s = st.slots[i];
-    if (s && s.type && s.type !== "未使用") refreshSlotFileOptions(node, i);
+    if (slotTypeOf(node, i) !== "未使用") refreshSlotFileOptions(node, i);
   }
   refreshStatusDOM(node);
 
   // 拖入文件夹导入（两种渲染模式通用）
   setupLoaderDragDrop(node);
 
-  // 工作流加载：控件值在 configure 之后才恢复，配置完成后重新同步状态并布局
+  // 工作流加载：控件值在 configure 之后才恢复，配置完成后重新布局
   const origCfg = node.onAfterGraphConfigured;
   node.onAfterGraphConfigured = function (...args) {
     try {
-      syncStateFromWidgets(node);
       applySlotVisibility(node);
       applyLoaderLabels(node);
       pushLoaderConfig(node);
@@ -1727,7 +1673,6 @@ function setupModelLoaderNode(node) {
   // 延时重同步：防止框架在 onNodeCreated 后重建控件覆盖显隐/回调；并兜底工作流值恢复
   setTimeout(() => {
     try {
-      syncStateFromWidgets(node);
       applySlotVisibility(node);
       applyLoaderLabels(node);
       pushLoaderConfig(node);
@@ -1736,7 +1681,6 @@ function setupModelLoaderNode(node) {
   }, 150);
   setTimeout(() => {
     try {
-      syncStateFromWidgets(node);
       applySlotVisibility(node);
       pushLoaderConfig(node);
       refreshAllSwitchCombos();
@@ -1822,13 +1766,13 @@ function refreshAllSwitchCombos() {
 
 /** 把加载器当前配置推送后端：开关下拉无需运行加载器即可识别（槽位配置即推即见）。 */
 async function pushLoaderConfig(node) {
-  const st = node && node.__zouyuSlotState;
-  if (!st) return;
+  if (!node) return;
   const slots = [];
   for (let i = 0; i < MAX_MODELS; i++) {
-    const s = st.slots[i];
-    if (!s || s.type === "未使用" || !s.name || s.name === "(未选择)" || s.name === "(无文件)") continue;
-    slots.push({ slot: i, tkey: TYPE_KEYS[s.type] || "other", folder: s.folder || "", name: s.name });
+    const t = slotTypeOf(node, i);
+    const n = slotNameOf(node, i);
+    if (t === "未使用" || !n) continue;
+    slots.push({ slot: i, tkey: TYPE_KEYS[t] || "other", folder: slotFolderOf(node, i), name: n });
   }
   try {
     await fetch("/zouyu_model_loader/register_config", {
