@@ -179,6 +179,33 @@ def _mark_used(kind):
             e["ts"] = _now()
 
 
+def _mark_used_for_patcher(patcher):
+    """按底层 model 对象匹配登记的模型并标记「正在调用」。
+
+    clone/delegate 共享 self.model（ModelPatcher.get_clone_model_override 返回同一 model），
+    因此采样器等节点 load_models_gpu(clone) 时也能正确标记登记实例（busy/绿）。
+    """
+    base_model = getattr(patcher, "model", None)
+    if base_model is None:
+        return
+    with _LOCK:
+        for kind, e in _REGISTRY["models"].items():
+            p = e.get("patcher")
+            if p is not None and getattr(p, "model", None) is base_model:
+                e["state"] = "busy"
+                e["ts"] = _now()
+                break
+
+
+def _same_model_family(e_patcher, patcher):
+    """登记 patcher 与触发回调的 patcher 是否同一模型族（clone/delegate 共享底层 model）。"""
+    if e_patcher is patcher:
+        return True
+    m1 = getattr(e_patcher, "model", None)
+    m2 = getattr(patcher, "model", None)
+    return m1 is not None and m1 is m2
+
+
 def clear_busy():
     """节点执行完成（前端 executed 事件）：清除所有「工作中」标记 → 按位置显示闲置/已卸载。"""
     with _LOCK:
@@ -194,7 +221,8 @@ def _hook_patches_models(patcher, kind):
 
     ComfyUI 的 `load_models_gpu` 对每个要使用的模型都会调用 `model_patches_models()`
     （无论模型是否已在显存），因此这是「模型正被当前节点调用」的可靠信号——
-    比 ON_LOAD（仅首次加载触发）更准，且只 hook 单个模型实例，与其它插件零冲突。
+    比 ON_LOAD（仅首次加载触发）更准。实例级包装对原始登记实例生效；
+    patch 节点 clone 出的新实例由类级 hook（_install_patches_models_class_hook）兜底。
     """
     try:
         if patcher is None or getattr(patcher, "__zouyu_pm_hooked", False):
@@ -210,6 +238,33 @@ def _hook_patches_models(patcher, kind):
             return orig(*args, **kwargs)
 
         patcher.model_patches_models = wrapped
+    except Exception:
+        pass
+
+
+def _install_patches_models_class_hook():
+    """类级 hook ModelPatcher.model_patches_models：模型克隆体也触发「工作中」检测。
+
+    之前只包装登记实例的方法——模型经 TESpeedMiniMaxH3 等 patch 节点 clone 后，
+    采样器 load_models_gpu(clone) 调用的是未包装的类方法，检测不到 → 采样时主模型
+    仍显示黄（闲置）。类级 hook 对所有实例生效，按底层 model 归属标记（纯检测，
+    不改方法签名/返回值，与其它插件零冲突）。
+    """
+    try:
+        from comfy.model_patcher import ModelPatcher
+        if getattr(ModelPatcher, "_zouyu_pm_class_hooked", False):
+            return
+        ModelPatcher._zouyu_pm_class_hooked = True
+        orig = ModelPatcher.model_patches_models
+
+        def wrapped(self, *args, **kwargs):
+            try:
+                _mark_used_for_patcher(self)
+            except Exception:
+                pass
+            return orig(self, *args, **kwargs)
+
+        ModelPatcher.model_patches_models = wrapped
     except Exception:
         pass
 
@@ -238,7 +293,7 @@ def _on_model_load(kind, patcher):
     """
     with _LOCK:
         e = _REGISTRY["models"].get(kind)
-        if e is not None and e["patcher"] is patcher:
+        if e is not None and _same_model_family(e["patcher"], patcher):
             e["state"] = "busy" if _REGISTRY.get("executing") else residency(patcher)
             e["ts"] = _now()
 
@@ -290,7 +345,7 @@ def _on_model_detach(kind, patcher):
         freed = 0
     with _LOCK:
         e = _REGISTRY["models"].get(kind)
-        if e is not None and e["patcher"] is patcher:
+        if e is not None and _same_model_family(e["patcher"], patcher):
             # 执行中正在调用（busy）时不被 detach 覆盖（load_models_gpu 处理已加载模型时
             # 会 detach 旧 clone 触发本回调，位置由 status_payload 结合 busy 实时判定）。
             # 非 busy 或非执行 → 更新位置快照（黄/红）。
@@ -526,12 +581,17 @@ def status_payload():
             patcher = e.get("patcher")
             if patcher is None:
                 st = "free"
+            elif executing and e.get("state") == "busy":
+                # 工作中（绿）：当前节点正在调用该模型。load_models_gpu 对传入模型
+                # 无条件调用 model_patches_models()（调用发生在实际加载前，此时模型
+                # 位置尚未更新），因此 busy 本身即「正在被调用」的可靠信号，直接绿。
+                st = "gpu"
             else:
-                pos = residency(patcher)
-                if executing and e.get("state") == "busy" and pos == "gpu":
-                    st = "gpu"                      # 工作中（绿）
-                else:
-                    st = "cpu" if pos != "free" else "free"  # 闲置（黄）/ 已卸载（红）
+                # 位置：回调快照（ON_LOAD/ON_DETACH，clone 场景也准确）优先；无快照时实时计算
+                pos = e.get("state")
+                if pos not in ("gpu", "cpu", "free"):
+                    pos = residency(patcher)
+                st = "cpu" if pos != "free" else "free"  # 闲置（黄）/ 已卸载（红）
             info = STATE_INFO.get(st, STATE_INFO["unknown"])
             mtype = e.get("model_type", "")
             tinfo = MODEL_TYPE_INFO.get(mtype, MODEL_TYPE_INFO["unknown"]) if mtype else None
@@ -939,6 +999,8 @@ def reveal_path(path):
 def register_routes():
     # 安装「模型是否正在工作」检测（仅 hook send_sync 捕获执行结束，链式兼容其它插件）
     _install_busy_detection()
+    # 安装类级 model_patches_models hook：patch 节点 clone 出的模型也能触发「工作中」检测
+    _install_patches_models_class_hook()
 
     try:
         from aiohttp import web
