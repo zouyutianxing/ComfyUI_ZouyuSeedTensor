@@ -1957,11 +1957,15 @@ api.addEventListener("execution_start", () => setExecState(true));
 api.addEventListener("executed", (event) => {
   try {
     const detail = event.detail;
-    if (!detail || detail.nodeId == null) return;
+    if (!detail) return;
+    // ComfyUI 0.33 的 executed 事件字段是 node_id（下划线）；旧版为 nodeId，兼容两者
+    const nodeId = detail.node_id != null ? detail.node_id : detail.nodeId;
     // 节点执行完成：清除该节点用过的模型的「工作中」标记（转闲置黄）——
     // 配合 model_patches_models hook，实现「当前节点正在调用的模型绿、其余黄」
     fetch("/zouyu_model_loader/clear_busy", { method: "POST" }).catch(() => {});
-    const node = app.graph?._nodes?.find((n) => String(n.id) === String(detail.nodeId));
+    const node = nodeId != null
+      ? app.graph?._nodes?.find((n) => String(n.id) === String(nodeId))
+      : null;
     if (!node) return;
     if (node.comfyClass === "ZouyuModelLoader") {
       refreshStatusDOM(node);
