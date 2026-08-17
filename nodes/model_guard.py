@@ -647,16 +647,38 @@ def _do_load_model(e, name, label, zh):
 def _do_unload_model(e, name, label, zh):
     """彻底卸载（低显存模式）：从显存卸载到 CPU，并释放权重内存。
 
+    卸载范围：登记实例族（clone_base_uuid 相同）+ 同权重规模的所有形态——
+    TE-Speed 等深度处理节点会产生不同 clone_base_uuid 的 patcher（实测 debug：
+    开关卸载后 current_loaded_models 仍残留 19.5GB unet），仅权重规模可关联，
+    必须一并卸载，否则「卸载信号」实际未释放模型权重。
+
     DynamicVRAM 模型由 partially_unload_ram 释放 CPU 权重；传统模型（非动态）
-    释放注册表对模型对象的引用，交由 GC 回收权重（模型已从官方缓存 unload_model_and_clones
-    移除，无其他持有者时真正释放内存）。状态显示红色「已卸载」。
-    重新加载时 patcher 为 None，会自动按登记文件重新加载。
+    释放注册表对模型对象的引用，交由 GC 回收权重。状态显示红色「已卸载」。
     """
     kind = e["kind"]
+    reg_uuid = e.get("clone_base_uuid")
+    reg_size = e.get("model_size")
     patcher = e.get("patcher")
-    if patcher is None:
-        return ("{} 已彻底卸载".format(label) if zh else "{} fully unloaded".format(label))
-    freed = fully_unload_patcher(patcher)
+    freed = 0
+    # 1) 卸载登记实例族
+    if patcher is not None:
+        freed = fully_unload_patcher(patcher)
+    # 2) 卸载同模型的其他形态（TE-Speed 等不同 uuid 但同权重规模的 patcher）
+    if reg_size is not None:
+        for loaded in list(model_management.current_loaded_models):
+            lm = loaded.model
+            if lm is None or lm is patcher:
+                continue
+            same = False
+            if reg_uuid is not None and reg_uuid == getattr(lm, "clone_base_uuid", None):
+                same = True
+            elif reg_size == _safe_model_size(lm):
+                same = True
+            if same:
+                try:
+                    freed += fully_unload_patcher(lm)
+                except Exception:
+                    pass
     with _LOCK:
         cur = _REGISTRY["models"].get(kind)
         if cur is not None:
