@@ -241,13 +241,14 @@ def _same_model_family(e_patcher, patcher):
 
 
 def _in_currently_used(e_patcher, e=None):
-    """登记模型是否在官方 current_loaded_models 中（底层兜底信号，只读官方状态，零冲突）。
+    """登记模型是否在官方 current_loaded_models 中且 currently_used（底层兜底信号，只读）。
 
-    判据：**只要模型仍在 current_loaded_models 即视为被使用**（而非 currently_used 标志）——
-    低显存模式下官方 free_memory 会动态 offload（置 currently_used=False 但**不弹出列表**，
-    DynamicVRAM 分支 memory_to_free=0，model_management.py:884-888），此时模型仍被采样器
-    使用（计算时临时调显存），必须显示绿；开关彻底卸载（unload_model_and_clones →
-    free_memory pop，:2076/:894）后模型离开列表 → 自动转红。
+    判据：模型在 current_loaded_models **且 currently_used=True**（load_models_gpu 置 True，
+    model_management.py:944；free_memory/unload 置 False，:876）。
+    - 采样器等节点 load_models_gpu 使用模型时 → True → 绿；
+    - 开关彻底卸载（unload_model_and_clones → free_memory 置 False 并从列表移除）→ 红；
+    - DynamicVRAM 模型卸载后仍留在列表（on-demand 机制）但 currently_used 已置 False
+      → 正确显示红（否则卸载的 VAE 会误标工作中）。
 
     匹配：先精确（同一实例 / BaseModel 相同 / clone_base_uuid 相同 / parent 链）；
     再宽匹配（权重规模相同——TE-Speed 等深度处理节点会构造全新 patcher（新 uuid、新
@@ -258,6 +259,8 @@ def _in_currently_used(e_patcher, e=None):
         reg_uuid = e.get("clone_base_uuid") if e is not None else getattr(e_patcher, "clone_base_uuid", None)
         reg_size = e.get("model_size") if e is not None else _safe_model_size(e_patcher)
         for loaded in model_management.current_loaded_models:
+            if not loaded.currently_used:
+                continue
             lm = loaded.model
             if lm is None:
                 continue
