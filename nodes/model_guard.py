@@ -172,16 +172,27 @@ def _safe_model_size(patcher):
 def set_exec_state(on):
     """设置「工作流执行中」标志（PromptExecutor.add_message 捕获执行事件 + 前端通知双保险）。
 
-    on=False（执行结束）时同时清除所有「工作中」标记 → 全部按位置显示闲置/已卸载。
+    on=False（执行结束）时同时清除所有「工作中」标记 → 恢复 busy 前的位置快照
+    （闲置/已卸载），而非用登记实例 residency 重算——clone 场景下登记实例可能报告
+    free（实际加载的是 clone），重算会误标。
     """
     with _LOCK:
         _REGISTRY["executing"] = bool(on)
         if not on:
             for e in _REGISTRY["models"].values():
                 if e.get("state") == "busy":
-                    p = e.get("patcher")
-                    e["state"] = residency(p) if p is not None else "free"
-                    e["ts"] = _now()
+                    _restore_state_after_busy(e)
+
+
+def _restore_state_after_busy(e):
+    """busy 清除后恢复位置快照（busy 置位时保存的 prev_state）。"""
+    prev = e.get("prev_state")
+    p = e.get("patcher")
+    if prev in ("gpu", "cpu", "free"):
+        e["state"] = prev
+    else:
+        e["state"] = residency(p) if p is not None else "free"
+    e["ts"] = _now()
 
 
 def _mark_used(kind):
@@ -189,20 +200,36 @@ def _mark_used(kind):
     with _LOCK:
         e = _REGISTRY["models"].get(kind)
         if e is not None and e.get("patcher") is not None:
+            if e["state"] != "busy":
+                e["prev_state"] = e["state"]
             e["state"] = "busy"
             e["ts"] = _now()
+
+
+def _same_weight_size(e_patcher, patcher):
+    """权重规模相同（TE-Speed 等深度处理节点构造全新 patcher 时仅此可关联）。"""
+    try:
+        s1 = _safe_model_size(e_patcher)
+        s2 = _safe_model_size(patcher)
+        return s1 is not None and s1 == s2
+    except Exception:
+        return False
 
 
 def _mark_used_for_patcher(patcher):
     """按模型家族匹配登记的模型并标记「正在调用」。
 
     覆盖任何形态的调用者：登记实例本身、clone（parent 链回溯）、deepcopy-clone（parent 链）、
-    delegate（共享 model）。
+    delegate（共享 model）、TE-Speed 深度处理的新 patcher（权重规模相同）。
     """
     with _LOCK:
         for kind, e in _REGISTRY["models"].items():
             p = e.get("patcher")
-            if p is not None and _same_model_family(p, patcher):
+            if p is None:
+                continue
+            if _same_model_family(p, patcher) or _same_weight_size(p, patcher):
+                if e["state"] != "busy":
+                    e["prev_state"] = e["state"]
                 e["state"] = "busy"
                 e["ts"] = _now()
                 break
@@ -280,13 +307,11 @@ def _in_currently_used(e_patcher, e=None):
 
 
 def clear_busy():
-    """节点执行完成（前端 executed 事件）：清除所有「工作中」标记 → 按位置显示闲置/已卸载。"""
+    """节点执行完成（前端 executed 事件）：清除所有「工作中」标记 → 恢复位置快照。"""
     with _LOCK:
         for e in _REGISTRY["models"].values():
             if e.get("state") == "busy":
-                p = e.get("patcher")
-                e["state"] = residency(p) if p is not None else "free"
-                e["ts"] = _now()
+                _restore_state_after_busy(e)
 
 
 def _hook_patches_models(patcher, kind):
@@ -361,13 +386,18 @@ def _attach_model_callbacks(patcher, kind):
 def _on_model_load(kind, patcher):
     """模型被加载到显存（ON_LOAD 回调）。
 
-    ON_LOAD 发生在 load_models_gpu 加载模型时——执行中即「当前节点正在调用」（保持 busy/绿）；
-    非执行（手动加载）按位置显示（闲置/黄）。
+    ON_LOAD 发生在 load_models_gpu 加载模型时——执行中即「当前节点正在调用」（保持 busy/绿，
+    保存 busy 前位置快照）；非执行（手动加载）按位置显示（闲置/黄）。
     """
     with _LOCK:
         e = _REGISTRY["models"].get(kind)
         if e is not None and _same_model_family(e["patcher"], patcher):
-            e["state"] = "busy" if _REGISTRY.get("executing") else residency(patcher)
+            if _REGISTRY.get("executing"):
+                if e["state"] != "busy":
+                    e["prev_state"] = e["state"]
+                e["state"] = "busy"
+            else:
+                e["state"] = residency(patcher)
             e["ts"] = _now()
 
 
@@ -642,6 +672,22 @@ def _do_unload_model(e, name, label, zh):
             if zh else "fully unloaded {} (VRAM+weights released)".format(label))
 
 
+def _position_state(e, patcher):
+    """位置判定（黄=闲置 / 红=已卸载）：回调快照与登记实例实时 residency 互补。
+
+    - 回调快照（ON_LOAD/ON_DETACH）来自触发者（可能是 clone），位置准确；
+    - 登记实例实时 residency 在 clone 场景可能报告 free（实际加载的是 clone）——
+      此时快照非 free 则优先快照；实时非 free（模型实际在显存/内存）则优先实时。
+    """
+    snap = e.get("state")
+    real = residency(patcher) if patcher is not None else "free"
+    if snap in ("gpu", "cpu") and real == "free":
+        pos = snap
+    else:
+        pos = real
+    return "cpu" if pos != "free" else "free"
+
+
 def status_payload():
     with _LOCK:
         models = []
@@ -669,18 +715,11 @@ def status_payload():
                 if busy:
                     st = "gpu"
                 else:
-                    pos = e.get("state")
-                    if pos not in ("gpu", "cpu", "free") or patcher is None:
-                        pos = residency(patcher) if patcher is not None else "free"
-                    st = "cpu" if pos != "free" else "free"
+                    st = _position_state(e, patcher)
             elif patcher is None:
                 st = "free"
             else:
-                # 位置：回调快照（ON_LOAD/ON_DETACH，clone 场景也准确）优先；无快照时实时计算
-                pos = e.get("state")
-                if pos not in ("gpu", "cpu", "free"):
-                    pos = residency(patcher)
-                st = "cpu" if pos != "free" else "free"  # 闲置（黄）/ 已卸载（红）
+                st = _position_state(e, patcher)
             info = STATE_INFO.get(st, STATE_INFO["unknown"])
             mtype = e.get("model_type", "")
             tinfo = MODEL_TYPE_INFO.get(mtype, MODEL_TYPE_INFO["unknown"]) if mtype else None
